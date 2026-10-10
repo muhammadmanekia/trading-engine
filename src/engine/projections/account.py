@@ -15,11 +15,13 @@ from decimal import Decimal
 from engine.domain.events import (
     AccountFunded,
     AnomalyDetected,
+    BaselineImported,
     CircuitBreakerReset,
     CircuitBreakerTripped,
     IntentAbandoned,
     IntentReceived,
     KillSwitchSet,
+    LedgerAdjusted,
     ModeSet,
     OrderAcked,
     OrderCancelled,
@@ -128,6 +130,15 @@ class AccountState:
         match ev:
             case AccountFunded():
                 self.cash += ev.amount
+            case BaselineImported():
+                self.cash += ev.cash
+                for bp in ev.positions:
+                    pos = self.positions.setdefault(("unmanaged", bp.symbol), Position())
+                    total = pos.quantity + bp.quantity
+                    pos.avg_cost = (pos.quantity * pos.avg_cost + bp.quantity * bp.avg_cost) / total
+                    pos.quantity = total
+            case LedgerAdjusted():
+                self._adjust(ev)
             case KillSwitchSet():
                 self.kill_switch = ev.active
             case ModeSet():
@@ -183,8 +194,11 @@ class AccountState:
             limit_price=ev.limit_price,
             stop_loss_price=ev.stop_loss_price,
             take_profit_price=ev.take_profit_price,
+            order_type=ev.order_type,
+            stop_price=ev.stop_price,
+            managed=ev.managed,
         )
-        if ev.role in ("entry", "exit"):
+        if ev.role in ("entry", "exit") and not ev.managed:
             self.order_times.append(ts)
             if len(self.order_times) > 2000:
                 del self.order_times[:1000]
@@ -229,7 +243,22 @@ class AccountState:
                 self.anomalies.append(f"{ev.order_id}: overfill {new_filled} > {order.quantity}")
             order.fill_ids.add(ev.fill_id)
             order.filled_quantity = new_filled
+            order.filled_notional += ev.quantity * ev.price
         self._apply_fill_economics(ev, ts)
+
+    def _adjust(self, ev: LedgerAdjusted) -> None:
+        self.cash += ev.cash_delta
+        for d in ev.position_deltas:
+            pos = self.positions.setdefault((d.strategy_id, d.symbol), Position())
+            new_qty = pos.quantity + d.quantity
+            if new_qty < 0:
+                self.anomalies.append(f"adjustment would make {d.symbol} negative; clamped to 0")
+                new_qty = ZERO
+            if d.quantity > 0 and d.avg_cost is not None and new_qty > 0:
+                pos.avg_cost = (pos.quantity * pos.avg_cost + d.quantity * d.avg_cost) / new_qty
+            pos.quantity = new_qty
+            if pos.quantity == 0:
+                pos.avg_cost = ZERO
 
     def _apply_fill_economics(self, ev: OrderFilled, ts: datetime) -> None:
         key = (ev.strategy_id, ev.symbol)

@@ -79,6 +79,8 @@ def check_system_state(c: Ctx) -> Outcome:
             return Reject("BAD_TIMESTAMP", "quote timestamp is in the future")
     if inst.asset_class is not c.intent.asset_class:
         return Reject("ASSET_CLASS_MISMATCH")
+    if c.is_entry and not inst.market_open:
+        return Reject("MARKET_CLOSED", "entries are only placed during the regular session")
     return None
 
 

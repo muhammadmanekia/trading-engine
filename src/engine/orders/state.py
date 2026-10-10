@@ -84,8 +84,12 @@ class OrderState:
     limit_price: Decimal | None = None
     stop_loss_price: Decimal | None = None
     take_profit_price: Decimal | None = None
+    order_type: str | None = None
+    stop_price: Decimal | None = None
+    managed: bool = False  # a leg the OrderManager placed itself (not a native broker leg)
     status: OrderStatus = OrderStatus.CREATED
     filled_quantity: Decimal = Decimal(0)
+    filled_notional: Decimal = Decimal(0)
     fill_ids: set[str] = field(default_factory=set)
     attempts: int = 0
     broker_order_id: str | None = None

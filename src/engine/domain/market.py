@@ -14,6 +14,7 @@ class InstrumentInfo(Frozen):
     quote_ts: UtcDatetime
     tradable: bool = True
     halted: bool = False
+    market_open: bool = True  # stocks: regular session; crypto is always open
     qty_step: PosDec = Decimal("0.00000001")
     avg_daily_volume_usd: NonNegDec | None = None
     market_cap_usd: NonNegDec | None = None

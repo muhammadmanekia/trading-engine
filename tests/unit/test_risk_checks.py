@@ -356,3 +356,10 @@ def test_exit_with_missing_config_still_fails_closed() -> None:
     s = held(fresh_state(), 10)
     d = evaluate(make_intent(side=Side.SELL, stop_loss_price=None), s, market(), system(), None)  # type: ignore[arg-type]
     assert d.kind == "reject" and d.code == "ENGINE_ERROR"
+
+
+def test_stock_entries_are_refused_when_the_market_is_closed_but_exits_pass() -> None:
+    closed = market(stock(market_open=False))
+    assert run(mkt=closed).code == "MARKET_CLOSED"
+    s = held(fresh_state(), 10)
+    assert run(make_intent(side=Side.SELL, stop_loss_price=None), s, mkt=closed).kind == "approve"

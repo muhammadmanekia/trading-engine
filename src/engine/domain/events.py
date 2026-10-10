@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import Field
@@ -87,6 +88,10 @@ class OrderCreated(Frozen):
     stop_loss_price: PosDec | None = None
     take_profit_price: PosDec | None = None
     parent_order_id: str | None = None
+    # Protective legs placed by the OrderManager itself (SEPARATE_ORDERS brokers) carry these.
+    order_type: Literal["market", "limit", "stop"] | None = None
+    stop_price: PosDec | None = None
+    managed: bool = False
 
 
 class OrderSubmitAttempted(Frozen):
@@ -132,6 +137,56 @@ class OrderExpired(Frozen):
     reason: str = ""
 
 
+# ---- reconciliation / baseline ----------------------------------------------------------------
+class BaselinePosition(Frozen):
+    symbol: str
+    quantity: PosDec
+    avg_cost: PosDec
+
+
+class BaselineImported(Frozen):
+    """Opening balances of a pre-existing broker account. Positions are 'unmanaged': counted in exposure
+    and equity, but never sold by a strategy."""
+
+    account_id: str
+    cash: NonNegDec
+    positions: tuple[BaselinePosition, ...] = ()
+    note: str = ""
+
+
+class PositionDelta(Frozen):
+    strategy_id: str
+    symbol: str
+    quantity: Dec
+    avg_cost: PosDec | None = None
+
+
+class LedgerAdjusted(Frozen):
+    """Operator-approved correction after a reconciliation drift (deposit, manual trade, ...)."""
+
+    account_id: str
+    cash_delta: Dec = Decimal(0)
+    position_deltas: tuple[PositionDelta, ...] = ()
+    reason: str
+
+
+class ReconciliationCompleted(Frozen):
+    account_id: str
+    ok: bool
+    drift_count: int
+    summary: str = ""
+
+
+class DriftDetected(Frozen):
+    account_id: str
+    kind: str
+    severity: Literal["warning", "critical"]
+    symbol: str | None = None
+    detail: str = ""
+    ledger_value: str | None = None
+    broker_value: str | None = None
+
+
 class AnomalyDetected(Frozen):
     account_id: str
     order_id: str | None = None
@@ -158,5 +213,9 @@ EVENT_MODELS: dict[str, type[Frozen]] = {
         OrderCancelled,
         OrderExpired,
         AnomalyDetected,
+        BaselineImported,
+        LedgerAdjusted,
+        ReconciliationCompleted,
+        DriftDetected,
     )
 }
