@@ -14,5 +14,18 @@ services:
       interval: 5s
       retries: 10
 
+  executor:
+    build: .
+    profiles: ["service"]        # docker compose --profile service up
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env               # ENGINE_DATABASE_URL, broker keys, DISCORD_WEBHOOK_URL (never commit .env)
+    environment:
+      ENGINE_DATABASE_URL: postgresql://engine:engine@postgres:5432/engine
+    volumes:
+      - ./config:/app/config:ro
+    # /healthz binds to the container loopback only; the image HEALTHCHECK probes it from inside.
+
 volumes:
   engine-pg:

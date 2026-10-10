@@ -1,0 +1,62 @@
+# Execution service configuration. Copy to config/local.toml (git-ignored) and edit.
+# Secrets are NEVER in this file; they come from environment variables (see README):
+#   ENGINE_DATABASE_URL, ALPACA_PAPER_KEY_ID/SECRET, ALPACA_LIVE_KEY_ID/SECRET,
+#   ROBINHOOD_API_KEY/PRIVATE_KEY, DISCORD_WEBHOOK_URL, ENGINE_ALLOW_LIVE
+
+[service]
+poll_interval_s = 2
+sync_interval_s = 5
+reconcile_interval_s = 60
+health_port = 8081
+alert_on_fills = true        # Discord message for every fill
+max_consecutive_errors = 5   # unexpected errors in a row before an account is halted
+
+# GLOBAL risk layer: replaces values in the built-in disposable-money preset (tighten OR loosen).
+# Account and strategy layers below can only TIGHTEN whatever is set here.
+[risk]
+daily_loss_cap_pct = 0.25
+max_consecutive_losses = 8
+
+# ---- US stocks on a NEW Alpaca account, paper first ---------------------------------------------
+[[accounts]]
+id = "alpaca-paper"
+broker = "alpaca"
+mode = "PAPER"
+symbols = ["AAPL", "MSFT", "NVDA"]   # always quoted; stocks trade whole shares only
+# The free IEX feed reports only IEX's slice of consolidated volume. Scale it up so the liquidity floor
+# means what it says (an estimate: tune it, or move to the SIP feed and set this back to 1).
+volume_scale = 25
+
+# Per-account limits layer on top of the disposable-money preset. The STRICTER value always wins,
+# so this can tighten the preset but never loosen it.
+[accounts.risk]
+max_position_pct = 0.20
+
+[accounts.strategies.momentum]
+strategy_budget = 5000
+
+# ---- Crypto PAPER: a simulator fed by live Robinhood quotes (Robinhood has no sandbox) --------------
+[[accounts]]
+id = "crypto-paper"
+broker = "paper-crypto"
+mode = "PAPER"
+starting_cash = 5000
+symbols = ["BTC-USD", "ETH-USD"]
+crypto_metadata = "config/crypto_pairs.json"   # the allowlist: ONLY these coins can ever be traded
+
+# ---- Crypto LIVE on your EXISTING Robinhood account ------------------------------------------------
+# Disabled until you are ready. To go live you must ALL of: set enabled = true, export ENGINE_ALLOW_LIVE=1,
+# and run `python -m engine.service set-mode --account crypto-live --mode LIVE --confirm`.
+# On first start the account's current cash and coins are imported as an opening balance; existing holdings
+# are 'unmanaged': counted in exposure limits but never sold by a strategy.
+[[accounts]]
+id = "crypto-live"
+broker = "robinhood"
+mode = "LIVE"
+enabled = false
+symbols = ["BTC-USD", "ETH-USD"]
+crypto_metadata = "config/crypto_pairs.json"
+
+[accounts.risk]
+max_position_pct = 0.05
+daily_loss_cap_pct = 0.05

@@ -14,7 +14,8 @@ from decimal import Decimal
 
 from engine.broker.alpaca import AlpacaBroker
 from engine.broker.base import Broker
-from engine.broker.paper import PaperBroker, PaperStateStore
+from engine.broker.paper import InMemoryPaperState, PaperBroker, PaperStateStore
+from engine.broker.robinhood_crypto import RobinhoodApi, RobinhoodCryptoBroker, load_pairs
 from engine.clock import Clock
 from engine.core import TradingCore
 from engine.domain.events import BaselinePosition
@@ -24,6 +25,7 @@ from engine.domain.types import Mode
 from engine.eventlog.base import EventStore
 from engine.marketdata.alpaca import AlpacaMarketData
 from engine.marketdata.base import MarketDataError, MarketDataProvider
+from engine.marketdata.robinhood import RobinhoodMarketData
 from engine.reconciler import Reconciler
 from engine.risk.config import RiskConfig, disposable_money_preset, merge
 from engine.service.config import AccountConfig, Secrets
@@ -68,8 +70,12 @@ class AccountRuntime:
         return self.broker.get_cash(), out
 
     def bootstrap(self) -> None:
-        """First start only: give the ledger its opening balances. Idempotent."""
+        """Teach the adapter the ledger's order ids, then (first start only) give the ledger its opening
+        balances. Idempotent."""
         state = self.core.projector.refresh()
+        register = getattr(self.broker, "register_client_ids", None)
+        if register is not None:
+            register(list(state.orders))
         if state.funded:
             return
         if self.paper is not None:
@@ -111,7 +117,7 @@ def build_runtime(
     secrets: Secrets,
     *,
     paper_state: PaperStateStore | None = None,
-    volume_scale: Decimal = Decimal(1),
+    base_risk: RiskConfig | None = None,
 ) -> AccountRuntime:
     """Create the real broker + market data for an account from configuration and secrets."""
     if cfg.mode is Mode.LIVE and not secrets.allow_live:
@@ -121,9 +127,27 @@ def build_runtime(
         if creds is None:
             raise ValueError(f"{cfg.id}: missing Alpaca {cfg.mode.value.lower()} credentials")
         alpaca = AlpacaBroker(creds[0], creds[1], cfg.mode)
-        market = AlpacaMarketData(creds[0], creds[1], alpaca, clock, volume_scale=volume_scale)
-        return assemble_runtime(cfg, store, clock, alpaca, market)
-    raise NotImplementedError(f"broker {cfg.broker!r} is wired up in sub-phase 2c")
+        market = AlpacaMarketData(creds[0], creds[1], alpaca, clock, volume_scale=cfg.volume_scale)
+        return assemble_runtime(cfg, store, clock, alpaca, market, base_risk=base_risk)
+    # Robinhood Crypto (live) and the crypto paper simulator both need Robinhood quotes
+    if secrets.robinhood is None:
+        raise ValueError(
+            f"{cfg.id}: missing Robinhood API credentials (needed for quotes even in paper mode)"
+        )
+    if not cfg.crypto_metadata:
+        raise ValueError(f"{cfg.id}: crypto_metadata (the tradable-coin allowlist file) is required")
+    pairs = load_pairs(cfg.crypto_metadata)
+    api = RobinhoodApi(secrets.robinhood[0], secrets.robinhood[1])
+    rh_market = RobinhoodMarketData(api, pairs, clock)
+    if cfg.broker == "paper-crypto":
+        assert cfg.starting_cash is not None
+        paper = PaperBroker(
+            clock, cfg.id, paper_state or InMemoryPaperState(), starting_cash=cfg.starting_cash, pairs=pairs
+        )
+        return assemble_runtime(cfg, store, clock, paper, rh_market, paper=paper, base_risk=base_risk)
+    return assemble_runtime(
+        cfg, store, clock, RobinhoodCryptoBroker(api, pairs), rh_market, base_risk=base_risk
+    )
 
 
 def assemble_runtime(
@@ -134,6 +158,7 @@ def assemble_runtime(
     market: MarketDataProvider,
     *,
     paper: PaperBroker | None = None,
+    base_risk: RiskConfig | None = None,
 ) -> AccountRuntime:
     """Wire a broker and market-data provider into a TradingCore. Pure wiring, no I/O (also used by tests)."""
     holder: dict[str, AccountRuntime] = {}
@@ -158,7 +183,7 @@ def assemble_runtime(
         )
 
     def config_provider(intent: Intent) -> RiskConfig:
-        return merge(disposable_money_preset(), cfg.risk, cfg.strategies.get(intent.strategy_id))
+        return merge(base_risk or disposable_money_preset(), cfg.risk, cfg.strategies.get(intent.strategy_id))
 
     core = TradingCore(
         store, broker, clock, cfg.id, market=market_provider, system=system_provider, config=config_provider

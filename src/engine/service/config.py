@@ -9,6 +9,7 @@ from __future__ import annotations
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 
@@ -28,6 +29,7 @@ class AccountConfig(Frozen):
     symbols: tuple[str, ...] = ()  # watchlist: always quoted (plus anything held or requested)
     starting_cash: PosDec | None = None  # paper-crypto only
     crypto_metadata: str | None = None  # path to the tradable-crypto allowlist (robinhood / paper-crypto)
+    volume_scale: PosDec = Decimal(1)  # multiply reported volume (the free IEX feed shows only a slice of it)
     risk: RiskOverride | None = None
     strategies: dict[str, RiskOverride] = Field(default_factory=dict)
 
@@ -47,6 +49,9 @@ class ServiceConfig(Frozen):
     health_port: int | None = 8081
     alert_on_fills: bool = True
     max_consecutive_errors: int = Field(default=5, gt=0)
+    risk: RiskOverride | None = (
+        None  # GLOBAL layer: replaces preset values; accounts/strategies can only tighten
+    )
     accounts: tuple[AccountConfig, ...]
 
     @model_validator(mode="after")
@@ -104,7 +109,10 @@ def load_config(path: str | Path) -> ServiceConfig:
     data = tomllib.loads(Path(path).read_text())
     service = data.get("service", {})
     accounts = [_account(a) for a in data.get("accounts", [])]
-    return ServiceConfig.model_validate({**service, "accounts": accounts})
+    extra: dict[str, object] = {}
+    if isinstance(data.get("risk"), dict):
+        extra["risk"] = {k: _num(v) for k, v in data["risk"].items()}
+    return ServiceConfig.model_validate({**service, **extra, "accounts": accounts})
 
 
 def _account(raw: dict[str, object]) -> dict[str, object]:
@@ -117,8 +125,9 @@ def _account(raw: dict[str, object]) -> dict[str, object]:
             sid: {k: _num(v) for k, v in over.items()}
             for sid, over in out["strategies"].items()  # type: ignore[attr-defined]
         }
-    if isinstance(out.get("starting_cash"), (int, float)):
-        out["starting_cash"] = str(out["starting_cash"])
+    for key in ("starting_cash", "volume_scale"):
+        if isinstance(out.get(key), (int, float)):
+            out[key] = str(out[key])
     return out
 
 

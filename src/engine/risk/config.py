@@ -105,6 +105,15 @@ def merge(base: RiskConfig, *layers: RiskOverride | None) -> RiskConfig:
     return RiskConfig.model_validate(values)
 
 
+def replace(base: RiskConfig, override: RiskOverride | None) -> RiskConfig:
+    """The GLOBAL layer: set fields outright (loosening or tightening the preset). Account and strategy layers
+    then go through `merge`, which can only tighten."""
+    if override is None:
+        return base
+    changes = {k: v for k, v in override.model_dump().items() if v is not None}
+    return RiskConfig.model_validate({**base.model_dump(), **changes})
+
+
 def disposable_money_preset() -> RiskConfig:
     """Loose limits for money the owner is willing to lose. Structural protections stay on."""
     return RiskConfig(

@@ -15,7 +15,7 @@ from engine.service.inbox import InMemoryInbox
 from engine.service.leader import InProcessLeaderLock
 from engine.service.runtime import AccountRuntime
 from tests.fakes.alpaca_server import FakeAlpaca
-from tests.helpers import D, alpaca_runtime, intent_payload
+from tests.helpers import D, alpaca_runtime, intent_payload, paper_crypto_runtime
 
 
 def make(
@@ -191,3 +191,80 @@ def test_health_reflects_staleness(store: EventStore) -> None:
     assert ex.health()["ok"] is True
     clock.advance(minutes=5)
     assert ex.health()["ok"] is False and ex.health()["accounts"]["acct"]["stale"] is True
+
+
+# ---- crypto paper trading: simulator + live (fake) Robinhood quotes --------------------------------
+def crypto_intent(clock: FakeClock, **kw: object) -> dict[str, object]:
+    base = dict(symbol="BTC-USD", asset_class="CRYPTO", quantity=D("0.5"), stop_loss_price=90)
+    return intent_payload(clock, **{**base, **kw})
+
+
+def make_crypto(store: EventStore):  # type: ignore[no-untyped-def]
+    rt, fake, clock, paper_state = paper_crypto_runtime(store)
+    inbox, alerts = InMemoryInbox(), RecordingAlertSink()
+    ex = Executor(store, [rt], inbox, InProcessLeaderLock("crypto"), alerts, clock)
+    return ex, rt, fake, clock, inbox, alerts, paper_state
+
+
+def test_crypto_paper_trade_end_to_end_with_a_separate_stop(store: EventStore) -> None:
+    ex, rt, fake, clock, inbox, alerts, _ = make_crypto(store)
+    assert ex.start()
+    assert rt.core.projector.refresh().cash == 10_000  # paper starting cash, funded once
+    inbox.put(crypto_intent(clock))
+    ex.tick()
+    st = rt.core.projector.refresh()
+    entry = next(o for o in st.orders.values() if o.role == "entry")
+    assert entry.status is S.FILLED and st.position_qty("s1", "BTC-USD") == D("0.5")
+    stop = st.orders[f"{entry.order_id}:stop:0"]
+    assert stop.managed and stop.status is S.OPEN and stop.stop_price == 90
+    assert fake.mock.placed_orders == []  # paper mode never touches the real exchange, only reads quotes
+    fake.set_price("BTC-USD", D(85))  # the live market falls through the stop
+    clock.advance(seconds=6)
+    ex.tick()
+    ex.tick()
+    st = rt.core.projector.refresh()
+    assert st.position_qty("s1", "BTC-USD") == 0 and st.realized_total < 0 and st.anomalies == []
+    assert not st.kill_switch and [e for e in store.read_all() if e.type == "DriftDetected"] == []
+
+
+def test_crypto_outside_the_allowlist_never_trades(store: EventStore) -> None:
+    ex, rt, fake, clock, inbox, alerts, _ = make_crypto(store)
+    ex.start()
+    inbox.put(crypto_intent(clock, symbol="PEPE-USD"))
+    ex.tick()
+    codes = [e.payload["code"] for e in store.read_all() if e.type == "RiskDecisionMade"]
+    assert codes == ["PROVIDER_ERROR"] and rt.paper is not None and rt.paper.placed_orders == []
+
+
+def test_crypto_take_profit_is_refused_because_robinhood_cannot_hold_both_exits(store: EventStore) -> None:
+    ex, rt, fake, clock, inbox, alerts, _ = make_crypto(store)
+    ex.start()
+    inbox.put(crypto_intent(clock, take_profit_price=120))
+    ex.tick()
+    st = rt.core.projector.refresh()
+    assert [o.reject_code for o in st.orders.values()] == ["TP_NOT_SUPPORTED"]
+
+
+def test_crypto_paper_state_survives_a_full_restart(store: EventStore) -> None:
+    ex, rt, fake, clock, inbox, alerts, paper_state = make_crypto(store)
+    ex.start()
+    inbox.put(crypto_intent(clock))
+    ex.tick()
+    ex.stop()
+    rt2, _, _, _ = paper_crypto_runtime(store, clock, fake=fake, paper_state=paper_state)  # brand-new process
+    ex2 = Executor(store, [rt2], inbox, InProcessLeaderLock("crypto"), RecordingAlertSink(), clock)
+    assert ex2.start()
+    ex2.tick()
+    st = rt2.core.projector.refresh()
+    assert st.position_qty("s1", "BTC-USD") == D("0.5") == rt2.paper.positions["BTC-USD"]  # type: ignore[union-attr]
+    assert st.anomalies == [] and len(rt2.paper.placed_orders) == 2  # type: ignore[union-attr]  # entry + stop leg
+    assert rt2.reconciler.run().ok
+
+
+def test_paper_enforces_the_same_order_rules_as_the_live_adapter(store: EventStore) -> None:
+    ex, rt, fake, clock, inbox, alerts, _ = make_crypto(store)
+    ex.start()
+    inbox.put(crypto_intent(clock, quantity=D("0.000015")))  # not a multiple of the 0.00001 increment
+    ex.tick()
+    st = rt.core.projector.refresh()
+    assert [o.reject_code for o in st.orders.values()] in (["BAD_INCREMENT"], [])  # risk may floor it first

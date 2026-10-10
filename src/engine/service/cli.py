@@ -22,6 +22,7 @@ from engine.domain.events import PositionDelta
 from engine.domain.types import Mode
 from engine.eventlog.postgres import PostgresEventStore, migrate
 from engine.projections.account import AccountProjector
+from engine.risk.config import disposable_money_preset, replace
 from engine.service.alerts import AlertSink, DiscordWebhookSink, LogAlertSink, MultiAlertSink
 from engine.service.config import Secrets, ServiceConfig, load_config
 from engine.service.executor import Executor, Intervals
@@ -121,7 +122,9 @@ def _control_command(
         control.adjust(args.reason, Decimal(args.cash_delta), deltas)
     elif args.command == "import-baseline":
         acct_cfg = next(a for a in cfg.accounts if a.id == args.account)
-        rt = build_runtime(acct_cfg, store, clock, secrets)
+        rt = build_runtime(
+            acct_cfg, store, clock, secrets, base_risk=replace(disposable_money_preset(), cfg.risk)
+        )
         cash, positions = rt.capture_baseline()
         done = control.import_baseline(cash, positions, note="imported by operator")
         print(
@@ -138,12 +141,15 @@ def _run(cfg: ServiceConfig, secrets: Secrets) -> int:
     clock = SystemClock()
     store = PostgresEventStore(dsn)
     paper_state = PostgresPaperState(dsn)
+    base_risk = replace(disposable_money_preset(), cfg.risk)
     runtimes: list[AccountRuntime] = []
     for acct in cfg.accounts:
         if not acct.enabled:
             log.info("account %s is disabled", acct.id)
             continue
-        runtimes.append(build_runtime(acct, store, clock, secrets, paper_state=paper_state))
+        runtimes.append(
+            build_runtime(acct, store, clock, secrets, paper_state=paper_state, base_risk=base_risk)
+        )
     if not runtimes:
         print("error: no enabled accounts", file=sys.stderr)
         return 2

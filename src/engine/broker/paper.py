@@ -17,6 +17,7 @@ from psycopg.types.json import Jsonb
 
 from engine.broker.base import BrokerOrder, OrderRequest, ProtectionMode
 from engine.broker.mock import MockBroker
+from engine.broker.robinhood_crypto import PairInfo, check_order_against_pairs
 from engine.clock import Clock
 from engine.domain.types import Mode
 
@@ -69,11 +70,15 @@ class PaperBroker(MockBroker):
         starting_cash: Decimal,
         fee_rate: Decimal = Decimal("0.0025"),
         protection: ProtectionMode = ProtectionMode.SEPARATE_ORDERS,
+        pairs: dict[str, PairInfo] | None = None,
     ) -> None:
         super().__init__(
             clock, mode=Mode.PAPER, fee_rate=fee_rate, protection=protection, starting_cash=starting_cash
         )
         self.account_id = account_id
+        self._pairs = (
+            pairs  # when given, enforce Robinhood's size/increment rules exactly like the live adapter
+        )
         self._state_store = state_store
         existing = state_store.load(account_id)
         if existing is not None:
@@ -92,6 +97,8 @@ class PaperBroker(MockBroker):
         self._persist()
 
     def submit(self, req: OrderRequest) -> BrokerOrder:
+        if self._pairs is not None and req.client_order_id not in self._orders:
+            check_order_against_pairs(self._pairs, req)
         try:
             return super().submit(req)
         finally:

@@ -16,7 +16,7 @@ import httpx
 from pydantic import SecretStr
 
 from engine.broker.alpaca import AlpacaBroker
-from engine.broker.base import BrokerError
+from engine.broker.base import BrokerError, CredentialsError
 from engine.broker.http import BrokerHttp
 from engine.clock import Clock
 from engine.domain.market import InstrumentInfo, MarketSnapshot
@@ -88,8 +88,8 @@ class AlpacaMarketData:
                     avg_daily_volume_usd=adv.get(s),
                 )
             return MarketSnapshot(as_of=self._clock.now(), instruments=instruments)
-        except MarketDataError:
-            raise
+        except (MarketDataError, CredentialsError):
+            raise  # bad keys must reach the executor intact so it halts the account
         except BrokerError as exc:
             raise MarketDataError(f"alpaca data unavailable: {exc}") from exc
         except (KeyError, ValueError, TypeError, ArithmeticError) as exc:

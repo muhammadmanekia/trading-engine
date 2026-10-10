@@ -29,6 +29,8 @@ from pydantic import SecretStr
 from engine.broker.alpaca import AlpacaBroker
 from engine.domain.types import Mode
 from tests.fakes.alpaca_server import BASE, FakeAlpaca
+from tests.fakes.robinhood_server import API_KEY, BASE as RH_BASE, FakeRobinhood, new_keypair
+from engine.broker.robinhood_crypto import PairInfo, RobinhoodApi, RobinhoodCryptoBroker
 from tests.helpers import D
 
 PX = D(100)
@@ -102,7 +104,27 @@ def _alpaca() -> Harness:
     )  # fmt: skip
 
 
+def _robinhood() -> Harness:
+    clock = FakeClock()
+    key, seed_b64 = new_keypair()
+    fake = FakeRobinhood(clock, key)
+    api = RobinhoodApi(
+        SecretStr(API_KEY), SecretStr(seed_b64), base_url=RH_BASE, client=fake.client,
+        time_source=lambda: clock.now().timestamp(), sleeper=lambda _s: None,
+    )  # fmt: skip
+    pairs = {"BTC-USD": PairInfo(asset_increment=D("0.00000001"), price_increment=D("0.01"))}
+    broker = RobinhoodCryptoBroker(api, pairs, now=lambda: clock.now().timestamp())
+    return Harness(
+        "robinhood-fake", broker, "BTC-USD", AssetClass.CRYPTO,
+        set_price=lambda p: fake.set_price("BTC-USD", p),
+        fail_next_submit=fake.fail_next_submit,
+        set_outage=lambda v: setattr(fake, "outage", v),
+        fractional=True,
+    )  # fmt: skip
+
+
 FACTORIES: dict[str, Callable[[], Harness]] = {
+    "robinhood-fake": _robinhood,
     "alpaca-fake": _alpaca,
     "mock-native": lambda: _mock("mock-native"),
     "mock-separate": lambda: _mock("mock-separate", protection=ProtectionMode.SEPARATE_ORDERS),

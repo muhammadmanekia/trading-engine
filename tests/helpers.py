@@ -197,3 +197,38 @@ def alpaca_runtime(  # type: ignore[no-untyped-def]
 
 def intent_payload(clock: FakeClock, **kw: object) -> dict[str, object]:
     return intent_now(clock, **kw).model_dump(mode="json")
+
+
+def paper_crypto_runtime(store: EventStore, clock: FakeClock | None = None, *, fake=None, paper_state=None):  # type: ignore[no-untyped-def]
+    """(runtime, fake Robinhood, clock): crypto paper trading on a simulator fed by (fake) live Robinhood quotes."""
+    from pydantic import SecretStr
+
+    from engine.broker.paper import InMemoryPaperState, PaperBroker
+    from engine.broker.robinhood_crypto import PairInfo, RobinhoodApi
+    from engine.marketdata.robinhood import RobinhoodMarketData
+    from engine.service.config import AccountConfig
+    from engine.service.runtime import assemble_runtime
+    from tests.fakes.robinhood_server import API_KEY, BASE, FakeRobinhood, new_keypair
+
+    clock = clock or FakeClock()
+    if fake is None:
+        key, seed = new_keypair()
+        fake = FakeRobinhood(clock, key)
+        fake._seed = seed
+    api = RobinhoodApi(
+        SecretStr(API_KEY), SecretStr(fake._seed), base_url=BASE, client=fake.client,
+        time_source=lambda: clock.now().timestamp(), sleeper=lambda _s: None,
+    )  # fmt: skip
+    pairs = {
+        "BTC-USD": PairInfo(
+            asset_increment=D("0.00001"), price_increment=D("0.01"), min_order_size=D("0.0001"), max_order_size=D(10),
+            market_cap_usd=D(1_200_000_000_000), avg_daily_volume_usd=D(30_000_000_000),
+        )
+    }  # fmt: skip
+    paper_state = paper_state or InMemoryPaperState()
+    paper = PaperBroker(clock, ACCOUNT, paper_state, starting_cash=D(10_000), pairs=pairs)
+    cfg = AccountConfig(
+        id=ACCOUNT, broker="paper-crypto", mode=Mode.PAPER, starting_cash=D(10_000), symbols=("BTC-USD",)
+    )
+    rt = assemble_runtime(cfg, store, clock, paper, RobinhoodMarketData(api, pairs, clock), paper=paper)
+    return rt, fake, clock, paper_state

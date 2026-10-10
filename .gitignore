@@ -6,3 +6,6 @@ __pycache__/
 .coverage
 *.egg-info/
 .hypothesis/
+config/local.toml
+config/crypto_pairs.json
+.env

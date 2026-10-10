@@ -14,7 +14,7 @@ import logging
 import random
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import httpx
@@ -60,6 +60,11 @@ class TokenBucket:
             self._sleep(wait)
 
 
+def conservative_bucket(sleeper: Callable[[float], None] = time.sleep) -> TokenBucket:
+    """1.5 requests/s, burst 30: well under typical broker limits (assumed, not verified)."""
+    return TokenBucket(rate_per_s=1.5, burst=30, sleeper=sleeper)
+
+
 class BrokerHttp:
     def __init__(
         self,
@@ -95,7 +100,7 @@ class BrokerHttp:
         method: str,
         path: str,
         *,
-        params: Mapping[str, Any] | None = None,
+        params: Mapping[str, Any] | list[tuple[str, Any]] | None = None,
         body: str | None = None,
     ) -> httpx.Response:
         """`path` starts with '/'. `body` is the exact JSON string to send (and sign)."""
@@ -130,10 +135,14 @@ class BrokerHttp:
         raise last
 
     def _send(
-        self, method: str, path: str, params: Mapping[str, Any] | None, body: str | None
+        self,
+        method: str,
+        path: str,
+        params: Mapping[str, Any] | Sequence[tuple[str, Any]] | None,
+        body: str | None,
     ) -> httpx.Response:
         url = self.base_url + path
-        req = self._client.build_request(method, url, params=params, content=body)
+        req = self._client.build_request(method, url, params=params, content=body)  # type: ignore[arg-type]
         if self._headers_for is not None:
             target = req.url.raw_path.decode()  # path plus encoded query, exactly as sent
             req.headers.update(self._headers_for(method, target, body or ""))

@@ -1,0 +1,18 @@
+{
+  "BTC-USD": {
+    "asset_increment": "0.00000001",
+    "price_increment": "0.01",
+    "min_order_size": "0.00001",
+    "max_order_size": "5",
+    "market_cap_usd": "1200000000000",
+    "avg_daily_volume_usd": "25000000000"
+  },
+  "ETH-USD": {
+    "asset_increment": "0.000001",
+    "price_increment": "0.01",
+    "min_order_size": "0.0001",
+    "max_order_size": "100",
+    "market_cap_usd": "400000000000",
+    "avg_daily_volume_usd": "12000000000"
+  }
+}
