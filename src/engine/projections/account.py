@@ -73,6 +73,7 @@ class AccountState:
     order_times: list[datetime] = field(default_factory=list)  # creation time of entry/exit orders
     orders: dict[str, OrderState] = field(default_factory=dict)
     anomalies: list[str] = field(default_factory=list)
+    funded: bool = False  # an AccountFunded or BaselineImported event has been applied
     last_seq: int = 0
 
     # ---- queries ----------------------------------------------------------------------------
@@ -130,7 +131,9 @@ class AccountState:
         match ev:
             case AccountFunded():
                 self.cash += ev.amount
+                self.funded = True
             case BaselineImported():
+                self.funded = True
                 self.cash += ev.cash
                 for bp in ev.positions:
                     pos = self.positions.setdefault(("unmanaged", bp.symbol), Position())
@@ -197,6 +200,7 @@ class AccountState:
             order_type=ev.order_type,
             stop_price=ev.stop_price,
             managed=ev.managed,
+            created_at=ts,
         )
         if ev.role in ("entry", "exit") and not ev.managed:
             self.order_times.append(ts)

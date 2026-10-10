@@ -1,0 +1,193 @@
+"""Execution service: end to end from the inbox to a filled, protected, reconciled position."""
+
+from __future__ import annotations
+
+from datetime import timedelta
+
+import pytest
+
+from engine.clock import FakeClock
+from engine.eventlog.base import EventStore
+from engine.orders.state import OrderStatus as S
+from engine.service.alerts import Level, RecordingAlertSink
+from engine.service.executor import Executor, Intervals
+from engine.service.inbox import InMemoryInbox
+from engine.service.leader import InProcessLeaderLock
+from engine.service.runtime import AccountRuntime
+from tests.fakes.alpaca_server import FakeAlpaca
+from tests.helpers import D, alpaca_runtime, intent_payload
+
+
+def make(
+    store: EventStore, *, key: str = "key", lock_name: str = "exec-test", **kw: object
+) -> tuple[
+    Executor, AccountRuntime, FakeAlpaca, FakeClock, InMemoryInbox, RecordingAlertSink, InProcessLeaderLock
+]:
+    rt, fake, clock = alpaca_runtime(store, key=key)
+    inbox, alerts, lock = InMemoryInbox(), RecordingAlertSink(), InProcessLeaderLock(lock_name)
+    ex = Executor(store, [rt], inbox, lock, alerts, clock, **kw)  # type: ignore[arg-type]
+    return ex, rt, fake, clock, inbox, alerts, lock
+
+
+@pytest.fixture(autouse=True)
+def _release_locks() -> object:
+    yield
+    InProcessLeaderLock._held.clear()
+
+
+def test_intent_flows_from_inbox_to_a_protected_filled_position(store: EventStore) -> None:
+    ex, rt, fake, clock, inbox, alerts, _ = make(store)
+    assert ex.start()
+    inbox.put(intent_payload(clock))
+    assert ex.tick()
+    st = rt.core.projector.refresh()
+    entry = next(o for o in st.orders.values() if o.role == "entry")
+    assert entry.status is S.FILLED and st.position_qty("s1", "AAPL") == 10
+    stop = st.orders[f"{entry.order_id}:stop"]
+    assert stop.status is S.OPEN  # native bracket leg is in the ledger and live at the broker
+    assert fake.mock.positions["AAPL"] == 10
+    titles = [a.title for a in alerts.alerts]
+    assert "Execution service started" in titles and any(t.startswith("Fill: BUY 10 AAPL") for t in titles)
+    assert ex.health()["ok"] is True
+
+
+def test_the_stop_fires_through_the_service_and_the_reconciler_stays_quiet(store: EventStore) -> None:
+    ex, rt, fake, clock, inbox, alerts, _ = make(
+        store, intervals=Intervals(sync=timedelta(seconds=60), reconcile=timedelta(0))
+    )
+    ex.start()
+    inbox.put(intent_payload(clock))
+    ex.tick()
+    fake.set_price("AAPL", D(85))
+    ex.tick()
+    ex.tick()
+    st = rt.core.projector.refresh()
+    assert st.position_qty("s1", "AAPL") == 0 == fake.mock.positions["AAPL"]
+    assert st.realized_total < 0 and not st.kill_switch
+    assert [e for e in store.read_all() if e.type == "DriftDetected"] == []
+
+
+def test_rejected_intents_are_decided_once_and_never_reach_the_broker(store: EventStore) -> None:
+    ex, rt, fake, clock, inbox, alerts, _ = make(store)
+    ex.start()
+    inbox.put(intent_payload(clock, stop_loss_price=None))
+    ex.tick()
+    ex.tick()
+    decisions = [e.payload for e in store.read_all() if e.type == "RiskDecisionMade"]
+    assert len(decisions) == 1 and decisions[0]["code"] == "NO_STOP_LOSS"
+    assert fake.mock.placed_orders == []
+
+
+def test_bad_inbox_rows_raise_a_warning_but_never_stop_the_service(store: EventStore) -> None:
+    ex, rt, fake, clock, inbox, alerts, _ = make(store)
+    ex.start()
+    bad = intent_payload(clock)
+    bad["quantity"] = 1.5
+    inbox.put(bad)
+    inbox.put(intent_payload(clock, account_id="other-account"))
+    inbox.put(intent_payload(clock))
+    ex.tick()
+    assert sum(1 for a in alerts.alerts if a.title == "Bad intent in inbox") == 2
+    assert fake.mock.positions["AAPL"] == 10  # the good one still traded
+
+
+def test_only_one_service_can_lead(store: EventStore) -> None:
+    ex1, *_ = make(store, lock_name="same")
+    rt2, _, clock2 = alpaca_runtime(store)
+    ex2 = Executor(store, [rt2], InMemoryInbox(), InProcessLeaderLock("same"), RecordingAlertSink(), clock2)
+    assert ex1.start() and not ex2.start()
+
+
+def test_losing_the_lock_stops_the_service_immediately(store: EventStore) -> None:
+    ex, rt, fake, clock, inbox, alerts, lock = make(store)
+    ex.start()
+    lock.lose_on_next_check = True
+    inbox.put(intent_payload(clock))
+    assert ex.tick() is False
+    assert fake.mock.placed_orders == [] and not ex.health()["leader"]  # no trading after losing leadership
+    assert any(a.level is Level.CRITICAL and "lost leadership" in a.title for a in alerts.alerts)
+
+
+def test_bad_credentials_halt_the_account_and_are_never_retried(store: EventStore) -> None:
+    ex, rt, fake, clock, inbox, alerts, _ = make(store, key="")  # the fake answers 401
+    ex.start()
+    assert rt.fatal and rt.core.projector.refresh().kill_switch
+    n = len(fake.requests)
+    inbox.put(intent_payload(clock))
+    ex.tick()
+    ex.tick()
+    assert len(fake.requests) == n  # a fatal account makes no further broker calls
+    assert any(a.level is Level.CRITICAL and "trading halted" in a.title for a in alerts.alerts)
+    assert ex.health()["ok"] is False
+
+
+def test_an_outage_never_crashes_the_loop_and_recovers(store: EventStore) -> None:
+    ex, rt, fake, clock, inbox, alerts, _ = make(store)
+    ex.start()
+    fake.outage = True
+    for _ in range(4):
+        assert ex.tick()
+        clock.advance(seconds=2)
+    warnings = [a for a in alerts.alerts if "unreachable" in a.title]
+    assert len(warnings) == 1  # once per outage, not once per tick
+    assert not rt.fatal and not rt.core.projector.refresh().kill_switch
+    fake.outage = False
+    inbox.put(intent_payload(clock))
+    ex.tick()
+    assert fake.mock.positions["AAPL"] == 10 and rt.consecutive_errors == 0
+
+
+def test_intent_during_a_data_outage_fails_closed(store: EventStore) -> None:
+    ex, rt, fake, clock, inbox, alerts, _ = make(store)
+    ex.start()
+    fake.outage = True
+    inbox.put(intent_payload(clock))
+    ex.tick()
+    codes = [e.payload["code"] for e in store.read_all() if e.type == "RiskDecisionMade"]
+    assert codes == ["PROVIDER_ERROR"] and fake.mock.placed_orders == []
+
+
+def test_runaway_unexpected_errors_halt_the_account(store: EventStore) -> None:
+    ex, rt, fake, clock, inbox, alerts, _ = make(store, max_consecutive_errors=3)
+    ex.start()
+
+    def boom() -> None:
+        raise RuntimeError("bug")
+
+    rt.core.process_pending = boom  # type: ignore[method-assign]
+    for _ in range(3):
+        ex.tick()
+    assert rt.fatal and rt.core.projector.refresh().kill_switch
+    assert any("consecutive unexpected errors" in a.body for a in alerts.alerts)
+
+
+def test_restart_resumes_without_duplicating_orders(store: EventStore) -> None:
+    ex, rt, fake, clock, inbox, alerts, lock = make(store)
+    ex.start()
+    inbox.put(intent_payload(clock))
+    ex.tick()
+    ex.stop()
+    rt2, _, _ = alpaca_runtime(store, clock, fake=fake)  # a new process, same log, same broker
+    ex2 = Executor(store, [rt2], inbox, InProcessLeaderLock("exec-test"), RecordingAlertSink(), clock)
+    assert ex2.start()
+    ex2.tick()
+    assert len(fake.mock.placed_orders) == 1 and fake.mock.positions["AAPL"] == 10
+    assert rt2.core.projector.refresh().anomalies == []
+
+
+def test_fills_alerts_can_be_turned_off(store: EventStore) -> None:
+    ex, rt, fake, clock, inbox, alerts, _ = make(store, alert_on_fills=False)
+    ex.start()
+    inbox.put(intent_payload(clock))
+    ex.tick()
+    assert not any(a.title.startswith("Fill:") for a in alerts.alerts)
+
+
+def test_health_reflects_staleness(store: EventStore) -> None:
+    ex, rt, fake, clock, inbox, alerts, _ = make(store)
+    assert ex.health()["ok"] is False  # not leader yet
+    ex.start()
+    ex.tick()
+    assert ex.health()["ok"] is True
+    clock.advance(minutes=5)
+    assert ex.health()["ok"] is False and ex.health()["accounts"]["acct"]["stale"] is True

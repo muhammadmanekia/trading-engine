@@ -23,6 +23,10 @@ from engine.broker.base import BrokerUnavailable, CredentialsError
 
 log = logging.getLogger("engine.broker.http")
 
+# httpx logs every request URL at INFO. A webhook URL is a credential, so never let it reach a log handler.
+for _noisy in ("httpx", "httpcore"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 HeadersFor = Callable[[str, str, str], Mapping[str, str]]  # (method, path_with_query, body) -> headers
 
 

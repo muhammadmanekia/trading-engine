@@ -132,6 +132,11 @@ class TradingCore:
     # ---- restart / recovery -----------------------------------------------------------------
     def recover(self) -> None:
         """Rebuild from the log, finish in-flight intents, and reconcile open orders with the broker."""
+        self.process_pending()
+        self.manager.sync()
+
+    def process_pending(self) -> None:
+        """Decide intents that were received but not yet decided, and place approved-but-unplaced ones."""
         state = self.projector.refresh()
         now = self.clock.now()
         for rec in list(state.intents.values()):
@@ -156,7 +161,6 @@ class TradingCore:
                     )
                 else:
                     self.manager.place(rec.intent, rec.approved_quantity)
-        self.manager.sync()
 
     # ---- kill switch ------------------------------------------------------------------------
     def activate_kill_switch(self, reason: str = "", *, cancel_open_entries: bool = True) -> list[str]:

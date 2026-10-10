@@ -151,3 +151,49 @@ class Crasher:
         if name == self.point and not self.fired:
             self.fired = True
             raise SimulatedCrash(name)
+
+
+# ---- Phase 2: an Alpaca-backed account runtime over the fake server ------------------------------
+def alpaca_runtime(  # type: ignore[no-untyped-def]
+    store: EventStore,
+    clock: FakeClock | None = None,
+    *,
+    fake=None,
+    key: str = "key",
+    symbols: tuple[str, ...] = ("AAPL",),
+    account_id: str = ACCOUNT,
+):
+    """(runtime, fake server, clock) for a paper Alpaca account whose HTTP goes to the in-process fake."""
+    from pydantic import SecretStr
+
+    from engine.broker.alpaca import AlpacaBroker
+    from engine.marketdata.alpaca import AlpacaMarketData
+    from engine.service.config import AccountConfig
+    from engine.service.runtime import assemble_runtime
+    from tests.fakes.alpaca_server import BASE, FakeAlpaca
+
+    clock = clock or FakeClock()
+    fake = fake or FakeAlpaca(clock)
+    broker = AlpacaBroker(
+        SecretStr(key),
+        SecretStr("secret"),
+        Mode.PAPER,
+        base_url=BASE,
+        client=fake.client,
+        sleeper=lambda _s: None,
+    )
+    md = AlpacaMarketData(
+        SecretStr(key),
+        SecretStr("secret"),
+        broker,
+        clock,
+        base_url=BASE,
+        client=fake.client,
+        sleeper=lambda _s: None,
+    )
+    cfg = AccountConfig(id=account_id, broker="alpaca", mode=Mode.PAPER, symbols=symbols)
+    return assemble_runtime(cfg, store, clock, broker, md), fake, clock
+
+
+def intent_payload(clock: FakeClock, **kw: object) -> dict[str, object]:
+    return intent_now(clock, **kw).model_dump(mode="json")

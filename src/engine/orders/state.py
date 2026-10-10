@@ -7,6 +7,7 @@ FILLED or REJECTED order, and any overfill, are illegal and surface as anomalies
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 
@@ -87,6 +88,7 @@ class OrderState:
     order_type: str | None = None
     stop_price: Decimal | None = None
     managed: bool = False  # a leg the OrderManager placed itself (not a native broker leg)
+    created_at: datetime | None = None
     status: OrderStatus = OrderStatus.CREATED
     filled_quantity: Decimal = Decimal(0)
     filled_notional: Decimal = Decimal(0)
