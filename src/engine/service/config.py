@@ -29,6 +29,7 @@ class AccountConfig(Frozen):
     symbols: tuple[str, ...] = ()  # watchlist: always quoted (plus anything held or requested)
     starting_cash: PosDec | None = None  # paper-crypto only
     crypto_metadata: str | None = None  # path to the tradable-crypto allowlist (robinhood / paper-crypto)
+    rules: tuple[str, ...] = ()  # strategy files (TOML) to run on this account
     volume_scale: PosDec = Decimal(1)  # multiply reported volume (the free IEX feed shows only a slice of it)
     risk: RiskOverride | None = None
     strategies: dict[str, RiskOverride] = Field(default_factory=dict)
@@ -48,6 +49,7 @@ class ServiceConfig(Frozen):
     reconcile_interval_s: float = Field(default=60.0, gt=0)
     health_port: int | None = 8081
     alert_on_fills: bool = True
+    record_quotes: bool = True  # keep price/spread history in Postgres for honest backtests
     max_consecutive_errors: int = Field(default=5, gt=0)
     risk: RiskOverride | None = (
         None  # GLOBAL layer: replaces preset values; accounts/strategies can only tighten

@@ -9,3 +9,5 @@ __pycache__/
 config/local.toml
 config/crypto_pairs.json
 .env
+.cache/
+runs/

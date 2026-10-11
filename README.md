@@ -3,6 +3,9 @@
 Event-sourced, fail-closed trading engine.
 
 * **Phase 1:** event log, risk engine, order manager, mock broker.
+* **Phase 3:** rule strategies as TOML files, a backtester that runs the real risk engine and order manager,
+  walk-forward / sensitivity checks, a live strategy runner, and a replay tool that measures how closely the
+  simulator tracked a real run. See [docs/strategies.md](docs/strategies.md).
 * **Phase 2:** Alpaca (stocks) and Robinhood Crypto adapters, crypto paper simulator, execution service,
   reconciler, Discord alerts. See [docs/phase2-api-notes.md](docs/phase2-api-notes.md) for what was verified
   against the vendors' docs and what still needs the opt-in live smoke tests.
@@ -29,6 +32,19 @@ Intent ──► Risk engine ──► Order manager ──► Broker (mock / pa
 | A crash at any step boundary, or any broker fault, never double-places an order | `tests/chaos/test_crash_matrix.py` |
 | The log is append-only and tamper-evident | Postgres triggers + SHA-256 hash chain |
 | Money is `Decimal` only | pydantic boundary + AST test |
+
+## Phase 3: strategies and backtests
+
+```bash
+python -m engine.backtest run --strategy strategies/examples/ema-cross-btc.toml \
+    --venue robinhood-crypto --data alpaca --start 2025-01-01 --out runs/ema-cross
+python -m engine.backtest walk-forward --strategy my.toml --venue alpaca-stocks --data alpaca \
+    --grid indicators.fast.period=8,12,16 --train-bars 2000 --test-bars 500
+```
+
+The guarantee, tested end to end (`tests/backtest/test_parity.py`): the strategy file you backtest is the one that
+trades. The full live stack (executor, runner, risk engine, order manager, broker adapter) fed the same bars
+produces the same trades, intent ids, prices and holding periods as the backtester.
 
 ## Phase 2: running it
 

@@ -29,7 +29,7 @@ def _float_uses(path: Path) -> list[str]:
 def test_money_path_has_no_floats() -> None:
     """Money and quantities are Decimal only. The sole mentions are the validator that rejects floats and
     the clock's time arithmetic."""
-    allowed = {"types.py", "clock.py"}
+    allowed = {"types.py", "clock.py", "schema.py"}  # schema.py: turns TOML floats into exact decimals
     offenders = [
         o
         for p in _py_files()

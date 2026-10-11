@@ -93,12 +93,11 @@ class InMemoryEventStore:
         self, after_seq: int = 0, account_id: str | None = None, limit: int | None = None
     ) -> list[StoredEvent]:
         with self._lock:
-            rows = [
-                e
-                for e in self._events
-                if e.seq > after_seq and (account_id is None or e.account_id == account_id)
-            ]
-            return rows[:limit] if limit is not None else rows
+            # seq is 1-based and contiguous, so 'after_seq' is a slice, not a scan (keeps long backtests fast)
+            rows = self._events[after_seq:]
+            if account_id is not None:
+                rows = [e for e in rows if e.account_id == account_id]
+            return rows[:limit] if limit is not None else list(rows)
 
     def verify_chain(self) -> None:
         with self._lock:

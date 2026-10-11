@@ -1,0 +1,147 @@
+"""Backtest CLI and the shipped example strategies."""
+
+from __future__ import annotations
+
+import math
+from pathlib import Path
+
+import pytest
+
+from engine.broker.base import ProtectionMode
+from engine.domain.types import AssetClass
+from engine.marketdata.history import to_csv
+from engine.service.backtest_cli import main
+from engine.strategy.schema import StrategyError, load_strategy, validate_for_venue
+from tests.helpers import bars_from_closes
+
+ROOT = Path(__file__).resolve().parents[2]
+STRATEGY = """
+id = "wave"
+universe = ["BTC-USD"]
+timeframe = "1h"
+lookback = 60
+[indicators]
+fast = { type = "sma", period = 3 }
+slow = { type = "sma", period = 9 }
+atr  = { type = "atr", period = 5 }
+[entry]
+cross_above = ["fast", "slow"]
+[exit]
+cross_below = ["fast", "slow"]
+[stop]
+type = "atr"
+multiple = 3
+[sizing]
+type = "fixed_quantity"
+quantity = 5
+"""
+
+
+@pytest.fixture
+def workdir(tmp_path: Path) -> Path:
+    closes = [100 + round(12 * math.sin(i / 7)) for i in range(220)]
+    to_csv(bars_from_closes(closes, spread="1", volume="500000000"), tmp_path / "BTC-USD_1h.csv")
+    (tmp_path / "wave.toml").write_text(STRATEGY)
+    return tmp_path
+
+
+def args(w: Path, command: str, *extra: str) -> list[str]:
+    return [command, "--strategy", str(w / "wave.toml"), "--venue", "robinhood-crypto", "--data", f"csv:{w}",
+            "--spread-bps", "20", *extra]  # fmt: skip
+
+
+def test_run_prints_a_summary_and_writes_the_reports(
+    workdir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(args(workdir, "run", "--out", str(workdir / "out")), {}) == 0
+    out = capsys.readouterr().out
+    assert "Backtest" in out and "robinhood-crypto" in out and "Trades" in out and "Risk engine" in out
+    assert {p.name for p in (workdir / "out").iterdir()} == {
+        "summary.json",
+        "summary.txt",
+        "trades.csv",
+        "equity.csv",
+    }
+
+
+def test_the_default_risk_limit_blocks_a_wide_spread_and_the_report_says_so(
+    workdir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    wide = [a for a in args(workdir, "run") if a not in ("--spread-bps", "20")] + ["--spread-bps", "400"]
+    assert main(wide, {}) == 0
+    out = capsys.readouterr().out
+    assert "SLIPPAGE_TOO_HIGH" in out and "NO TRADES" in out
+
+
+def test_walk_forward_and_sensitivity_commands(workdir: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(args(workdir, "walk-forward", "--train-bars", "80", "--test-bars", "40", "--min-trades", "1",
+                     "--grid", "indicators.fast.period=2,3", "--grid", "stop.multiple=2,3"), {}) == 0  # fmt: skip
+    wf = capsys.readouterr().out
+    assert "Walk-forward over" in wf and "out-of-sample return" in wf and "parameter stability" in wf
+    assert (
+        main(
+            args(workdir, "sensitivity", "--param", "indicators.fast.period", "--param", "stop.multiple"), {}
+        )
+        == 0
+    )
+    assert "nearby settings are profitable" in capsys.readouterr().out
+
+
+def test_bad_inputs_exit_with_a_clear_error(workdir: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(args(workdir, "run")[:-2] + ["--data", "alpaca"], {}) == 2  # alpaca data needs keys
+    assert "ALPACA_PAPER_KEY_ID" in capsys.readouterr().err
+    assert (
+        main(
+            [
+                "run",
+                "--strategy",
+                str(workdir / "missing.toml"),
+                "--venue",
+                "robinhood-crypto",
+                "--data",
+                f"csv:{workdir}",
+            ],
+            {},
+        )
+        == 2
+    )
+    assert main(args(workdir, "walk-forward", "--train-bars", "80", "--test-bars", "40",
+                     "--grid", "a=" + ",".join(map(str, range(30))), "--grid", "b=" + ",".join(map(str, range(30)))), {}) == 2  # fmt: skip
+    assert "overfits" in capsys.readouterr().err
+
+
+def test_the_shipped_examples_are_valid_and_respect_their_venues() -> None:
+    crypto = load_strategy(ROOT / "strategies/examples/ema-cross-btc.toml")
+    stocks = load_strategy(ROOT / "strategies/examples/rsi-dip-stocks.toml")
+    validate_for_venue(crypto, ProtectionMode.SEPARATE_ORDERS, AssetClass.CRYPTO)  # Robinhood: stop only
+    validate_for_venue(stocks, ProtectionMode.NATIVE_BRACKET, AssetClass.STOCK)  # Alpaca: bracket allowed
+    with pytest.raises(StrategyError, match="take_profit"):
+        validate_for_venue(
+            stocks.model_copy(update={"universe": ("AAPL",)}),
+            ProtectionMode.SEPARATE_ORDERS,
+            AssetClass.STOCK,
+        )
+    assert crypto.warmup == 49 and stocks.warmup == 100 and crypto.hash != stocks.hash
+
+
+def test_replay_command_reports_zero_error_for_a_perfectly_modelled_run(
+    pg_dsn: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from engine.eventlog.postgres import PostgresEventStore
+    from engine.service.inbox import InMemoryInbox  # noqa: F401  (the live harness builds its own)
+    from tests.backtest.test_parity import live, wavy_bars
+
+    bars = wavy_bars()
+    store = PostgresEventStore(pg_dsn)
+    live(bars, store=store)
+    store.close()
+    to_csv(bars, tmp_path / "AAPL_1h.csv")
+    code = main(
+        ["replay", "--account", "acct", "--venue", "alpaca-stocks", "--data", f"csv:{tmp_path}",
+         "--timeframe", "1h", "--symbols", "AAPL", "--spread-bps", "0", "--slippage-bps", "0",
+         "--fee-rate", "0", "--adv-usd", "1000000000"],
+        {"ENGINE_DATABASE_URL": pg_dsn},
+    )  # fmt: skip
+    out = capsys.readouterr().out
+    assert code == 0 and "mean fill error 0.00 bps" in out and "0 filled in only one world" in out
+    assert "WARNING" not in out

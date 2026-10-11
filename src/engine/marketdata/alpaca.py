@@ -6,9 +6,10 @@ understates real volume many times over. Tune `min_avg_daily_volume_usd` accordi
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable, Sequence
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -22,6 +23,7 @@ from engine.clock import Clock
 from engine.domain.market import InstrumentInfo, MarketSnapshot
 from engine.domain.types import AssetClass
 from engine.marketdata.base import MarketDataError, parse_rfc3339
+from engine.marketdata.history import Bar, timeframe_delta, validate_bars
 
 DATA_URL = "https://data.alpaca.markets"
 ZERO = Decimal(0)
@@ -181,3 +183,91 @@ class AlpacaMarketData:
 
     def _store(self, kind: str, key: str, value: Any) -> None:
         self._cache[(kind, key)] = (self._clock.now() + self._ttl[kind], value)
+
+
+# ---- historical bars -----------------------------------------------------------------------------
+_TF = {"1h": "1Hour", "1d": "1Day"}
+CRYPTO_BARS_PATH = "/v1beta3/crypto/us/bars"
+STOCK_BARS_PATH = "/v2/stocks/bars"
+
+
+class AlpacaBars:
+    """Closed historical bars from Alpaca: stocks (split-adjusted) and crypto ('BTC-USD' is requested as 'BTC/USD').
+
+    Bar timestamps are OPEN times. A bar that has not finished yet is never returned. Numbers are parsed straight
+    from the JSON text into Decimal, never through a float.
+    """
+
+    def __init__(
+        self,
+        key_id: SecretStr,
+        secret: SecretStr,
+        clock: Clock,
+        *,
+        base_url: str = DATA_URL,
+        client: httpx.Client | None = None,
+        sleeper: Callable[[float], None] = time.sleep,
+        feed: str = "iex",
+    ) -> None:
+        self._clock = clock
+        self._feed = feed
+        self._http = BrokerHttp(
+            base_url,
+            name="alpaca-bars",
+            headers_for=lambda m, t, b: {
+                "APCA-API-KEY-ID": key_id.get_secret_value(),
+                "APCA-API-SECRET-KEY": secret.get_secret_value(),
+            },
+            client=client,
+            sleeper=sleeper,
+        )
+
+    def bars(self, symbol: str, timeframe: str, start: datetime, end: datetime) -> list[Bar]:
+        if timeframe not in _TF:
+            raise MarketDataError(f"unsupported timeframe {timeframe!r}")
+        crypto = "-" in symbol
+        wire = symbol.replace("-", "/")
+        path = CRYPTO_BARS_PATH if crypto else STOCK_BARS_PATH
+        params: dict[str, Any] = {
+            "symbols": wire,
+            "timeframe": _TF[timeframe],
+            "start": start.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "end": end.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "limit": 10000,
+            "sort": "asc",
+        }
+        if not crypto:
+            params.update(adjustment="split", feed=self._feed)
+        out: list[Bar] = []
+        delta = timeframe_delta(timeframe)
+        try:
+            for _ in range(500):  # pagination guard
+                resp = self._http.request("GET", path, params=params)
+                if resp.status_code != 200:
+                    raise MarketDataError(f"{path}: HTTP {resp.status_code}")
+                body = json.loads(resp.text, parse_float=Decimal)
+                for raw in (body.get("bars") or {}).get(wire, []):
+                    bar = Bar(
+                        ts=parse_rfc3339(raw["t"]),
+                        open=Decimal(str(raw["o"])),
+                        high=Decimal(str(raw["h"])),
+                        low=Decimal(str(raw["l"])),
+                        close=Decimal(str(raw["c"])),
+                        volume=Decimal(str(raw.get("v", 0))),
+                    )
+                    if bar.ts + delta <= self._clock.now() and start <= bar.ts < end:
+                        out.append(bar)
+                token = body.get("next_page_token")
+                if not token:
+                    break
+                params["page_token"] = token
+            else:
+                raise MarketDataError(f"{path}: pagination did not terminate")
+        except CredentialsError:
+            raise
+        except BrokerError as exc:
+            raise MarketDataError(f"alpaca bars unavailable: {exc}") from exc
+        except (KeyError, ValueError, TypeError, ArithmeticError) as exc:
+            raise MarketDataError(f"unparseable alpaca bars: {type(exc).__name__}: {exc}") from exc
+        validate_bars(out, timeframe)  # raises on unsorted/duplicate data
+        return out

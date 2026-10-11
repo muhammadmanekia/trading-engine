@@ -1,0 +1,30 @@
+# Trend following: buy when a fast EMA crosses above a slow EMA, sell when it crosses back.
+# Crypto on Robinhood can hold a stop-loss only (no take-profit), so exits come from the rule or the stop.
+id = "ema-cross-btc"
+version = 1
+description = "12/48 EMA cross on hourly BTC with a 2.5x ATR stop"
+universe = ["BTC-USD"]
+timeframe = "1h"
+cooldown_bars = 3          # wait 3 bars after an exit before re-entering (avoids whipsaw churn)
+
+[indicators]
+fast = { type = "ema", period = 12 }
+slow = { type = "ema", period = 48 }
+atr  = { type = "atr", period = 14 }
+
+[entry]
+all = [
+  { cross_above = ["fast", "slow"] },
+  { gt = ["close", { mul = ["slow", 0.99] }] },   # not already far below the slow average
+]
+
+[exit]
+cross_below = ["fast", "slow"]
+
+[stop]
+type = "atr"
+multiple = 2.5            # stop = close - 2.5 * ATR(14)
+
+[sizing]
+type = "risk_fraction"
+risk_pct = 0.01           # lose at most 1% of the strategy budget if the stop is hit

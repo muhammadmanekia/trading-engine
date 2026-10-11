@@ -25,6 +25,7 @@ from engine.domain.intent import Intent
 from engine.domain.market import MarketSnapshot
 from engine.domain.types import AssetClass, Mode, Side
 from engine.eventlog.postgres import PostgresEventStore, migrate
+from engine.marketdata.recorder import PostgresQuoteRecorder
 from engine.projections.account import AccountProjector
 from engine.risk.config import disposable_money_preset, replace
 from engine.service.alerts import AlertSink, DiscordWebhookSink, LogAlertSink, MultiAlertSink
@@ -205,6 +206,7 @@ def _run(cfg: ServiceConfig, secrets: Secrets) -> int:
         intervals=Intervals(),
         alert_on_fills=cfg.alert_on_fills,
         max_consecutive_errors=cfg.max_consecutive_errors,
+        recorder=PostgresQuoteRecorder(dsn) if cfg.record_quotes else None,
     )
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):

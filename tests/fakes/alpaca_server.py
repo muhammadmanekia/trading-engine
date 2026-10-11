@@ -9,6 +9,7 @@ opt-in live paper test validates the fake against the real API.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from collections import deque
 from decimal import Decimal
 from typing import Any
@@ -41,6 +42,10 @@ class FakeAlpaca:
         self.adv_usd: dict[str, Decimal] = {}  # per-symbol average daily dollar volume
         self.untradable: set[str] = set()
         self.no_quotes: set[str] = set()
+        self.history: dict[
+            str, list[Any]
+        ] = {}  # canonical symbol -> Bars served by the historical-bars routes
+        self.bars_page = 3  # tiny pages so pagination is always exercised
         self._faults: deque[SubmitFault] = deque()
         self.requests: list[tuple[str, str]] = []
         self.posted: list[dict[str, Any]] = []  # JSON bodies of POST /v2/orders, as received
@@ -114,6 +119,10 @@ class FakeAlpaca:
                 if s in self.mock.prices
             }
             return httpx.Response(200, json={"trades": out})
+        if method == "GET" and path in ("/v2/stocks/bars", "/v1beta3/crypto/us/bars"):
+            served = self._history_bars(path, params)
+            if served is not None:
+                return served
         if method == "GET" and path == "/v2/stocks/bars":
             bars = {}
             for sym in params["symbols"].split(","):
@@ -140,6 +149,31 @@ class FakeAlpaca:
                 200, json={"is_open": self.market_open, "next_open": "x", "next_close": "y"}
             )
         return httpx.Response(404, json={"message": f"no route {method} {path}"})
+
+    def _history_bars(self, path: str, params: dict[str, str]) -> httpx.Response | None:
+        wire = params["symbols"].split(",")[0]
+        bars = self.history.get(wire.replace("/", "-"))
+        if not bars or "end" not in params:  # the volume lookup (no 'end') is served by the synthetic route
+            return None
+        if ("/" in wire) != ("crypto" in path):
+            return httpx.Response(400, json={"message": "wrong endpoint for this symbol"})
+        lo = datetime.fromisoformat(params["start"].replace("Z", "+00:00"))
+        hi = datetime.fromisoformat(params["end"].replace("Z", "+00:00"))
+        rows = [b for b in bars if lo <= b.ts <= hi]
+        offset = int(params.get("page_token", "0"))
+        page = rows[offset : offset + self.bars_page]
+        more = offset + self.bars_page < len(rows)
+        body = {
+            "bars": {
+                wire: [
+                    {"t": b.ts.strftime("%Y-%m-%dT%H:%M:%SZ"), "o": float(b.open), "h": float(b.high),
+                     "l": float(b.low), "c": float(b.close), "v": float(b.volume)}
+                    for b in page
+                ]
+            },
+            "next_page_token": str(offset + self.bars_page) if more else None,
+        }  # fmt: skip
+        return httpx.Response(200, json=body)
 
     def _ts(self) -> str:
         return self.clock.now().strftime("%Y-%m-%dT%H:%M:%S") + ".123456789Z"

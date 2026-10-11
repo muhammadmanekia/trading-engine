@@ -232,3 +232,31 @@ def paper_crypto_runtime(store: EventStore, clock: FakeClock | None = None, *, f
     )
     rt = assemble_runtime(cfg, store, clock, paper, RobinhoodMarketData(api, pairs, clock), paper=paper)
     return rt, fake, clock, paper_state
+
+
+# ---- Phase 3: synthetic bars ---------------------------------------------------------------------
+def bars_from_closes(closes, *, start=None, step=None, spread="0.5", volume="1000"):  # type: ignore[no-untyped-def]
+    """Bars whose open is the previous close and whose range is +/- `spread` around the open/close."""
+    from datetime import timedelta
+
+    from engine.marketdata.history import Bar
+
+    start = start or T0
+    step = step or timedelta(hours=1)
+    out = []
+    prev = None
+    for i, c in enumerate(closes):
+        c = D(str(c))
+        o = prev if prev is not None else c
+        out.append(
+            Bar(
+                ts=start + i * step,
+                open=o,
+                high=max(o, c) + D(spread),
+                low=max(min(o, c) - D(spread), D("0.0001")),
+                close=c,
+                volume=D(volume),
+            )  # fmt: skip
+        )
+        prev = c
+    return out

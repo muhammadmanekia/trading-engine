@@ -10,6 +10,7 @@ reconcile_interval_s = 60
 health_port = 8081
 alert_on_fills = true        # Discord message for every fill
 max_consecutive_errors = 5   # unexpected errors in a row before an account is halted
+record_quotes = true         # keep price/spread history so backtests can use the real spread
 
 # GLOBAL risk layer: replaces values in the built-in disposable-money preset (tighten OR loosen).
 # Account and strategy layers below can only TIGHTEN whatever is set here.
@@ -23,6 +24,7 @@ id = "alpaca-paper"
 broker = "alpaca"
 mode = "PAPER"
 symbols = ["AAPL", "MSFT", "NVDA"]   # always quoted; stocks trade whole shares only
+rules = []                            # strategy files to run here, e.g. ["strategies/examples/rsi-dip-stocks.toml"]
 # The free IEX feed reports only IEX's slice of consolidated volume. Scale it up so the liquidity floor
 # means what it says (an estimate: tune it, or move to the SIP feed and set this back to 1).
 volume_scale = 25

@@ -14,13 +14,14 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from engine.broker.base import BrokerError, BrokerUnavailable, CredentialsError
 from engine.clock import Clock
 from engine.eventlog.base import EventStore
 from engine.marketdata.base import MarketDataError
+from engine.marketdata.recorder import QuoteSink
 from engine.service.alerts import Alert, AlertSink, Level, events_to_alerts
 from engine.service.inbox import IntentInbox, ingest
 from engine.service.leader import LeaderLock
@@ -55,6 +56,7 @@ class Executor:
         intervals: Intervals | None = None,
         alert_on_fills: bool = True,
         max_consecutive_errors: int = 5,
+        recorder: QuoteSink | None = None,
     ) -> None:
         self.store = store
         self.runtimes = runtimes
@@ -65,6 +67,7 @@ class Executor:
         self.intervals = intervals or Intervals()
         self.alert_on_fills = alert_on_fills
         self.max_errors = max_consecutive_errors
+        self.recorder = recorder
         self.status = ExecutorStatus()
         self._alert_cursor = 0
         self._outage_alerted: set[str] = set()
@@ -137,6 +140,8 @@ class Executor:
         now = self.clock.now()
         try:
             self._refresh_paper(rt)
+            if rt.runner is not None:
+                rt.runner.tick()  # propose intents from newly closed bars
             rt.core.process_pending()
             reconcile_due = rt.last_reconcile is None or now - rt.last_reconcile >= self.intervals.reconcile
             sync_due = rt.last_sync is None or now - rt.last_sync >= self.intervals.sync
@@ -146,6 +151,7 @@ class Executor:
             if reconcile_due:
                 rt.reconciler.run()
                 rt.last_reconcile = now
+            self._record_quotes(rt, now)
             rt.consecutive_errors = 0
             rt.last_tick = now
             self._outage_alerted.discard(rt.cfg.id)
@@ -171,6 +177,17 @@ class Executor:
                 self._fatal(
                     rt, f"{rt.consecutive_errors} consecutive unexpected errors: {type(exc).__name__}"
                 )
+
+    def _record_quotes(self, rt: AccountRuntime, now: datetime) -> None:
+        """Best effort: the quote history improves backtests but must never disturb trading."""
+        if self.recorder is None or not rt.cfg.symbols or not self.recorder.due(rt.cfg.id, now):
+            return
+        try:
+            self.recorder.store(rt.cfg.id, rt.market.snapshot(list(rt.cfg.symbols)), now)
+        except CredentialsError:
+            raise
+        except Exception:
+            log.warning("%s: quote recording skipped", rt.cfg.id, exc_info=True)
 
     def _refresh_paper(self, rt: AccountRuntime) -> None:
         if rt.paper is None:

@@ -278,6 +278,10 @@ class MockBroker:
                 order.children.append(cid)
         self._match(order)
 
+    def _execution_price(self, o: _Order) -> Decimal:
+        """The price a marketable order fills at. The backtest broker overrides this (open, gaps, costs)."""
+        return self.prices[o.req.symbol]
+
     def _marketable(self, o: _Order) -> bool:
         price = self.prices[o.req.symbol]
         if o.trigger == "stop":
@@ -302,7 +306,7 @@ class MockBroker:
         qty = remaining if whole else min(remaining, o.quantity * self.fill_fraction)
         if qty <= 0:
             return
-        price = self.prices[o.req.symbol]
+        price = self._execution_price(o)
         if o.req.side is Side.SELL:
             qty = min(qty, self.positions.get(o.req.symbol, ZERO))
             if qty <= 0:

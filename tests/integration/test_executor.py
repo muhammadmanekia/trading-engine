@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Any
 
 import pytest
 
@@ -19,7 +20,7 @@ from tests.helpers import D, alpaca_runtime, intent_payload, paper_crypto_runtim
 
 
 def make(
-    store: EventStore, *, key: str = "key", lock_name: str = "exec-test", **kw: object
+    store: EventStore, *, key: str = "key", lock_name: str = "exec-test", **kw: Any
 ) -> tuple[
     Executor, AccountRuntime, FakeAlpaca, FakeClock, InMemoryInbox, RecordingAlertSink, InProcessLeaderLock
 ]:
@@ -268,3 +269,56 @@ def test_paper_enforces_the_same_order_rules_as_the_live_adapter(store: EventSto
     ex.tick()
     st = rt.core.projector.refresh()
     assert [o.reject_code for o in st.orders.values()] in (["BAD_INCREMENT"], [])  # risk may floor it first
+
+
+# ---- quote recording (feeds honest backtest costs) -----------------------------------------------
+def test_the_executor_records_quotes_at_most_once_per_interval(store: EventStore) -> None:
+    from engine.marketdata.recorder import InMemoryQuoteRecorder
+
+    recorder = InMemoryQuoteRecorder(interval=timedelta(seconds=60))
+    ex, rt, fake, clock, inbox, alerts, _ = make(store, recorder=recorder)
+    ex.start()
+    for _ in range(5):
+        ex.tick()
+        clock.advance(seconds=10)  # 50s in total: still inside one recording interval
+    assert len(recorder.rows) == 1 and recorder.rows[0][2] == "AAPL"
+    clock.advance(seconds=30)
+    ex.tick()
+    assert len(recorder.rows) == 2
+
+
+def test_a_broken_recorder_never_disturbs_trading(store: EventStore) -> None:
+    class Broken:
+        def due(self, account_id: str, now: object) -> bool:
+            return True
+
+        def store(self, account_id: str, snapshot: object, now: object) -> int:
+            raise RuntimeError("disk full")
+
+    ex, rt, fake, clock, inbox, alerts, _ = make(store, recorder=Broken())
+    ex.start()
+    inbox.put(intent_payload(clock))
+    assert ex.tick() and not rt.fatal
+    assert fake.mock.positions["AAPL"] == 10  # the trade still happened
+
+
+def test_recorded_spreads_become_a_measured_backtest_cost(pg_dsn: str) -> None:
+    from datetime import datetime, timezone
+
+    from engine.domain.market import MarketSnapshot
+    from engine.marketdata.recorder import PostgresQuoteRecorder, recorded_spread_bps
+    from tests.helpers import crypto
+
+    rec = PostgresQuoteRecorder(pg_dsn, interval=timedelta(0))
+    t0 = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    for i, bps in enumerate([180, 190, 200, 210, 220] * 8):  # 40 samples, median 200
+        snap = MarketSnapshot(
+            as_of=t0, instruments={"BTC-USD": crypto("BTC-USD", 60000, est_slippage_bps=D(bps))}
+        )
+        rec.store("acct", snap, t0 + timedelta(minutes=i))
+    assert recorded_spread_bps(pg_dsn, "BTC-USD") == D(200)
+    assert recorded_spread_bps(pg_dsn, "ETH-USD") is None  # nothing recorded
+    assert (
+        recorded_spread_bps(pg_dsn, "BTC-USD", min_samples=500) is None
+    )  # too little data to claim a number
+    rec.close()

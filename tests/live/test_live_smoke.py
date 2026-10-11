@@ -96,3 +96,20 @@ def test_robinhood_signed_reads_work_and_have_the_shape_we_parse() -> None:
     assert isinstance(broker.list_open_orders(), list)  # orders/ with pagination
     snap = RobinhoodMarketData(api, pairs, SystemClock()).snapshot(["BTC-USD"])  # best_bid_ask/
     assert snap.instruments["BTC-USD"].price > 0
+
+
+@pytest.mark.live_paper
+def test_alpaca_historical_bars_for_stocks_and_crypto() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from engine.marketdata.alpaca import AlpacaBars
+
+    _alpaca()  # skips unless the paper keys are configured
+    key, secret = os.environ["ALPACA_PAPER_KEY_ID"], os.environ["ALPACA_PAPER_SECRET"]
+    bars = AlpacaBars(SecretStr(key), SecretStr(secret), SystemClock())
+    now = datetime.now(UTC)
+    daily = bars.bars("AAPL", "1d", now - timedelta(days=40), now)
+    assert len(daily) >= 15 and all(b.high >= b.low for b in daily)
+    hourly = bars.bars("BTC-USD", "1h", now - timedelta(days=3), now)  # crypto trades around the clock
+    assert len(hourly) >= 48 and hourly == sorted(hourly, key=lambda b: b.ts)
+    assert hourly[-1].ts + timedelta(hours=1) <= now  # never the bar still forming

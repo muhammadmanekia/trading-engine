@@ -22,6 +22,9 @@ class FakeClock:
     def now(self) -> datetime:
         return self._now
 
+    def set(self, when: datetime) -> None:
+        self._now = when
+
     def advance(self, seconds: float = 0, **kwargs: float) -> datetime:
         self._now += timedelta(seconds=seconds, **kwargs)
         return self._now

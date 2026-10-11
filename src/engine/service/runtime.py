@@ -21,14 +21,19 @@ from engine.core import TradingCore
 from engine.domain.events import BaselinePosition
 from engine.domain.intent import Intent
 from engine.domain.market import MarketSnapshot, SystemState
-from engine.domain.types import Mode
+from engine.domain.types import AssetClass, Mode
 from engine.eventlog.base import EventStore
-from engine.marketdata.alpaca import AlpacaMarketData
+from engine.marketdata.alpaca import AlpacaBars, AlpacaMarketData
 from engine.marketdata.base import MarketDataError, MarketDataProvider
+from engine.marketdata.history import HistoricalData
 from engine.marketdata.robinhood import RobinhoodMarketData
+from engine.projections.account import AccountState
 from engine.reconciler import Reconciler
 from engine.risk.config import RiskConfig, disposable_money_preset, merge
 from engine.service.config import AccountConfig, Secrets
+from engine.strategy.runner import StrategyRunner
+from engine.strategy.schema import StrategyDef, load_strategy, validate_for_venue
+from engine.strategy.source import RuleStrategySource
 
 
 class LiveNotAllowed(Exception):
@@ -49,6 +54,7 @@ class AccountRuntime:
     last_sync: datetime | None = None
     last_reconcile: datetime | None = None
     last_tick: datetime | None = None
+    runner: StrategyRunner | None = None
 
     def symbols(self) -> list[str]:
         """Everything we must have a quote for: the watchlist, holdings, working orders, pending intents."""
@@ -110,7 +116,7 @@ class _CachedMarket:
         return self._snap
 
 
-def build_runtime(
+def _build_base(
     cfg: AccountConfig,
     store: EventStore,
     clock: Clock,
@@ -198,3 +204,52 @@ def assemble_runtime(
     )
     holder["rt"] = rt
     return rt
+
+
+def build_runtime(
+    cfg: AccountConfig,
+    store: EventStore,
+    clock: Clock,
+    secrets: Secrets,
+    *,
+    paper_state: PaperStateStore | None = None,
+    base_risk: RiskConfig | None = None,
+) -> AccountRuntime:
+    """The real broker + market data for an account, plus its strategies (if any) wired to a StrategyRunner."""
+    rt = _build_base(cfg, store, clock, secrets, paper_state=paper_state, base_risk=base_risk)
+    if cfg.rules:
+        creds = secrets.alpaca_live if cfg.mode is Mode.LIVE else secrets.alpaca_paper
+        creds = creds or secrets.alpaca_paper or secrets.alpaca_live
+        if creds is None:
+            raise ValueError(f"{cfg.id}: strategies need Alpaca data credentials for historical bars")
+        history = AlpacaBars(creds[0], creds[1], clock)
+        attach_rules(rt, [load_strategy(p) for p in cfg.rules], history, clock, base_risk=base_risk)
+    return rt
+
+
+def attach_rules(
+    rt: AccountRuntime,
+    strategies: list[StrategyDef],
+    history: HistoricalData,
+    clock: Clock,
+    *,
+    base_risk: RiskConfig | None = None,
+    min_interval: timedelta = timedelta(seconds=30),
+) -> StrategyRunner:
+    """Validate strategies against this account's venue and attach a runner for them."""
+    for strategy in strategies:
+        validate_for_venue(strategy, rt.broker.protection, _venue_class(rt))
+    sources = [RuleStrategySource(s, rt.cfg.id) for s in strategies]
+
+    def budget(name: str, state: AccountState, snapshot: MarketSnapshot) -> Decimal:
+        risk = merge(base_risk or disposable_money_preset(), rt.cfg.risk, rt.cfg.strategies.get(name))
+        return (
+            risk.strategy_budget if risk.strategy_budget is not None else state.equity(snapshot.price_map())
+        )
+
+    rt.runner = StrategyRunner(sources, history, rt.core, rt.market, clock, budget, min_interval=min_interval)
+    return rt.runner
+
+
+def _venue_class(rt: AccountRuntime) -> AssetClass:
+    return AssetClass.STOCK if rt.cfg.broker == "alpaca" else AssetClass.CRYPTO
