@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: engine
       POSTGRES_DB: engine
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5433:5432"   # host port 5433 (5432 is often taken); localhost only
     volumes:
       - engine-pg:/var/lib/postgresql/data
     healthcheck:

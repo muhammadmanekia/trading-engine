@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from engine.domain.types import Mode
 from engine.service.config import Secrets, load_config
 from engine.service.logging_setup import RedactingFilter
+from tests.helpers import D
 
 TOML = """
 [service]
@@ -295,3 +296,21 @@ def test_cli_manual_order_flow_end_to_end(
     assert cli(pg_dsn, tmp_path, "show", "--account", "alpaca-paper", "--intent-id", iid) == 0
     assert "decision: pending" in capsys.readouterr().out
     store.close()
+
+
+def test_quotes_table_flags_spreads_above_the_limit() -> None:
+    from engine.service.cli import format_quotes
+    from tests.helpers import crypto, market, stock
+
+    out = format_quotes(
+        market(
+            crypto("BTC-USD", 100000, est_slippage_bps=D(210)),
+            crypto("ETH-USD", 3000, est_slippage_bps=D(40)),
+            stock(),
+        ),
+        D(150),
+    )
+    lines = {line.split()[0]: line for line in out.splitlines()[1:]}
+    assert (
+        "TOO WIDE" in lines["BTC-USD"] and lines["ETH-USD"].rstrip().endswith("ok") and "n/a" in lines["AAPL"]
+    )

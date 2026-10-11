@@ -22,6 +22,7 @@ from engine.clock import SystemClock
 from engine.control import Control
 from engine.domain.events import PositionDelta
 from engine.domain.intent import Intent
+from engine.domain.market import MarketSnapshot
 from engine.domain.types import AssetClass, Mode, Side
 from engine.eventlog.postgres import PostgresEventStore, migrate
 from engine.projections.account import AccountProjector
@@ -77,6 +78,7 @@ def _parser() -> argparse.ArgumentParser:
         ("adjust", "record an operator-approved ledger correction"),
         ("submit-intent", "queue a manual trade intent (the running service decides and executes it)"),
         ("show", "show what happened to one intent: decision, orders, fills"),
+        ("quotes", "print the live quote, spread estimate and risk-relevant facts for an account's symbols"),
     ):
         sp = sub.add_parser(name, help=help_)
         sp.add_argument("--config", required=True)
@@ -102,6 +104,8 @@ def _parser() -> argparse.ArgumentParser:
             sp.add_argument("--dry-run", action="store_true", help="print the intent without queueing it")
         if name == "show":
             sp.add_argument("--intent-id", required=True)
+        if name == "quotes":
+            sp.add_argument("--account", required=True)
         if name == "adjust":
             sp.add_argument("--reason", required=True)
             sp.add_argument("--cash-delta", default="0")
@@ -124,7 +128,7 @@ def _control_command(
                 f"anomalies={len(st.anomalies)}"
             )
         return 0
-    if args.account not in {a.id for a in cfg.accounts}:
+    if args.command != "quotes" and args.account not in {a.id for a in cfg.accounts}:
         print(f"error: unknown account {args.account!r}", file=sys.stderr)
         return 2
     control = Control(store, clock, args.account)
@@ -143,6 +147,17 @@ def _control_command(
         return _submit_intent(args, secrets, clock)
     elif args.command == "show":
         return _show(args, store)
+    elif args.command == "quotes":
+        acct_cfg = next((a for a in cfg.accounts if a.id == args.account), None)
+        if acct_cfg is None:
+            print(f"error: unknown account {args.account!r}", file=sys.stderr)
+            return 2
+        rt = build_runtime(
+            acct_cfg, store, clock, secrets, base_risk=replace(disposable_money_preset(), cfg.risk)
+        )
+        limit = replace(disposable_money_preset(), cfg.risk).max_slippage_bps
+        print(format_quotes(rt.market.snapshot(list(acct_cfg.symbols)), limit))
+        return 0
     elif args.command == "import-baseline":
         acct_cfg = next(a for a in cfg.accounts if a.id == args.account)
         rt = build_runtime(
@@ -258,3 +273,17 @@ def _show(args: argparse.Namespace, store: PostgresEventStore) -> int:
         f"position now: {state.position_qty(rec.intent.strategy_id, rec.intent.symbol)} {rec.intent.symbol}"
     )
     return 0
+
+
+def format_quotes(snapshot: MarketSnapshot, max_slippage_bps: Decimal) -> str:
+    lines = [
+        f"{'symbol':10} {'price':>14} {'est. spread/slippage':>22}  verdict (limit {max_slippage_bps} bps)"
+    ]
+    for sym, i in sorted(snapshot.instruments.items()):
+        bps = i.est_slippage_bps
+        if bps is None:
+            lines.append(f"{sym:10} {i.price:>14}  {'n/a (stock)':>22}")
+            continue
+        verdict = "ok" if bps <= max_slippage_bps else "TOO WIDE: the engine will reject entries"
+        lines.append(f"{sym:10} {i.price:>14.2f} {bps:>19.1f} bps  {verdict}")
+    return "\n".join(lines)
