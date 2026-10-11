@@ -267,3 +267,31 @@ def test_json_logging_redacts_secrets(capsys: pytest.CaptureFixture[str]) -> Non
     logging.getLogger("t").warning("token is %s", "super-secret-value")
     line = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert line["level"] == "WARNING" and "super-secret-value" not in line["msg"] and "***" in line["msg"]
+
+
+def test_cli_manual_order_flow_end_to_end(
+    pg_dsn: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """submit-intent -> (service decides) -> show. Here the 'service' is TradingCore over the same database."""
+    import re
+
+    from engine.clock import SystemClock
+    from engine.eventlog.postgres import PostgresEventStore
+    from engine.service.inbox import PostgresInbox, ingest
+
+    assert cli(pg_dsn, tmp_path, "submit-intent", "--account", "alpaca-paper", "--symbol", "AAPL",
+               "--asset-class", "STOCK", "--side", "BUY", "--quantity", "3", "--stop-loss", "90", "--dry-run") == 0  # fmt: skip
+    assert "dry run" in capsys.readouterr().out
+    assert cli(pg_dsn, tmp_path, "submit-intent", "--account", "alpaca-paper", "--symbol", "AAPL",
+               "--asset-class", "STOCK", "--side", "BUY", "--quantity", "3", "--stop-loss", "90") == 0  # fmt: skip
+    iid = re.search(r"--intent-id (manual-\w+)", capsys.readouterr().out).group(1)  # type: ignore[union-attr]
+
+    store, clock = PostgresEventStore(pg_dsn), SystemClock()
+    assert (
+        cli(pg_dsn, tmp_path, "show", "--account", "alpaca-paper", "--intent-id", iid) == 1
+    )  # not ingested yet
+    ingest(PostgresInbox(pg_dsn), store, clock, {"alpaca-paper"})
+    capsys.readouterr()
+    assert cli(pg_dsn, tmp_path, "show", "--account", "alpaca-paper", "--intent-id", iid) == 0
+    assert "decision: pending" in capsys.readouterr().out
+    store.close()

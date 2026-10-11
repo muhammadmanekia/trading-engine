@@ -74,6 +74,26 @@ What keeps it safe, beyond the Phase 1 guarantees:
 | Paper and live reject the same orders (shared validation) and exercise the same OrderManager path | `test_paper_broker.py` |
 | Secrets never reach logs, errors or alerts (confined to adapter/service layers; redaction; httpx URL logging off) | `test_invariants.py`, `test_http.py`, `test_alerts.py` |
 
+## Placing a manual order (try it on paper first)
+
+The service must be running (`run`). Then, in another terminal (only `ENGINE_DATABASE_URL` is needed):
+
+```bash
+# 1. Preview. Nothing is queued. A BUY needs a stop price below the market.
+python -m engine.service submit-intent --config config/local.toml --account crypto-paper \
+    --symbol BTC-USD --asset-class CRYPTO --side BUY --quantity 0.0001 --stop-loss 50000 --dry-run
+# 2. Queue it (drop --dry-run). It prints an intent id.
+# 3. A couple of seconds later, see what the risk engine decided and what the broker did:
+python -m engine.service show --config config/local.toml --account crypto-paper --intent-id manual-ab12cd34ef56
+python -m engine.service status --config config/local.toml
+```
+
+You will see a decision (`approve` / `resize` / `reject` with a reason code), the entry order, a separate
+stop-loss order, and a Discord message per fill. Do this on `crypto-paper` (simulator, no money) before the
+first real Robinhood order. For a first LIVE test, use the smallest size Robinhood allows (the
+`min_order_size` in your allowlist file) and a stop a few percent below the market. To sell, submit a SELL
+intent for the same strategy (default `manual`); strategies can only sell what they bought themselves.
+
 ## Run the tests
 
 ```bash
