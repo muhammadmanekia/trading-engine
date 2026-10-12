@@ -9,6 +9,7 @@ from __future__ import annotations
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal
@@ -30,6 +31,7 @@ class AccountConfig(Frozen):
     starting_cash: PosDec | None = None  # paper-crypto only
     crypto_metadata: str | None = None  # path to the tradable-crypto allowlist (robinhood / paper-crypto)
     rules: tuple[str, ...] = ()  # strategy files (TOML) to run on this account
+    llm_strategies: tuple[str, ...] = ()  # LLM strategy files (TOML); needs the [llm] section
     volume_scale: PosDec = Decimal(1)  # multiply reported volume (the free IEX feed shows only a slice of it)
     risk: RiskOverride | None = None
     strategies: dict[str, RiskOverride] = Field(default_factory=dict)
@@ -43,6 +45,24 @@ class AccountConfig(Frozen):
         return self
 
 
+class LLMProviderConfig(Frozen):
+    kind: Literal["anthropic", "xai"]
+    model: str = Field(min_length=1)
+    knowledge_cutoff: date | None = None  # for flagging leakage when scoring against older news
+    input_per_mtok: PosDec | None = (
+        None  # USD per million tokens; unset -> the budget assumes a pessimistic price
+    )
+    output_per_mtok: PosDec | None = None
+
+
+class LLMConfig(Frozen):
+    daily_usd: PosDec = Decimal(2)
+    monthly_usd: PosDec = Decimal(30)
+    news_poll_s: float = Field(default=30.0, gt=0)
+    news_max_age_minutes: int = Field(default=120, gt=0)
+    providers: dict[str, LLMProviderConfig] = Field(default_factory=dict)
+
+
 class ServiceConfig(Frozen):
     poll_interval_s: float = Field(default=2.0, gt=0)
     sync_interval_s: float = Field(default=5.0, gt=0)
@@ -51,6 +71,7 @@ class ServiceConfig(Frozen):
     alert_on_fills: bool = True
     record_quotes: bool = True  # keep price/spread history in Postgres for honest backtests
     max_consecutive_errors: int = Field(default=5, gt=0)
+    llm: LLMConfig | None = None
     risk: RiskOverride | None = (
         None  # GLOBAL layer: replaces preset values; accounts/strategies can only tighten
     )
@@ -70,6 +91,8 @@ class Secrets:
     alpaca_paper: tuple[SecretStr, SecretStr] | None = None
     alpaca_live: tuple[SecretStr, SecretStr] | None = None
     robinhood: tuple[SecretStr, SecretStr] | None = None  # (api key, base64 private key)
+    anthropic_key: SecretStr | None = None
+    xai_key: SecretStr | None = None
     discord_webhook: SecretStr | None = None
     allow_live: bool = False
     _all: tuple[str, ...] = field(default=(), repr=False)
@@ -91,14 +114,17 @@ class Secrets:
             alpaca_live=pair("ALPACA_LIVE_KEY_ID", "ALPACA_LIVE_SECRET"),
             robinhood=pair("ROBINHOOD_API_KEY", "ROBINHOOD_PRIVATE_KEY"),
             discord_webhook=one("DISCORD_WEBHOOK_URL"),
+            anthropic_key=one("ANTHROPIC_API_KEY"),
+            xai_key=one("XAI_API_KEY"),
             allow_live=env.get("ENGINE_ALLOW_LIVE") == "1",
         )
         values = [db]
         for p in (s.alpaca_paper, s.alpaca_live, s.robinhood):
             if p:
                 values += [x.get_secret_value() for x in p]
-        if s.discord_webhook:
-            values.append(s.discord_webhook.get_secret_value())
+        for k in (s.discord_webhook, s.anthropic_key, s.xai_key):
+            if k:
+                values.append(k.get_secret_value())
         object.__setattr__(s, "_all", tuple(v for v in values if v))
         return s
 
@@ -114,6 +140,8 @@ def load_config(path: str | Path) -> ServiceConfig:
     extra: dict[str, object] = {}
     if isinstance(data.get("risk"), dict):
         extra["risk"] = {k: _num(v) for k, v in data["risk"].items()}
+    if isinstance(data.get("llm"), dict):
+        extra["llm"] = _floats_to_str(data["llm"])
     return ServiceConfig.model_validate({**service, **extra, "accounts": accounts})
 
 
@@ -136,3 +164,9 @@ def _account(raw: dict[str, object]) -> dict[str, object]:
 def _num(v: object) -> object:
     """TOML floats become strings so they reach pydantic as exact decimals, never as binary floats."""
     return str(v) if isinstance(v, float) else v
+
+
+def _floats_to_str(v: object) -> object:
+    if isinstance(v, dict):
+        return {k: _floats_to_str(x) for k, x in v.items()}
+    return _num(v)

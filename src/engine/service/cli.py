@@ -25,6 +25,9 @@ from engine.domain.intent import Intent
 from engine.domain.market import MarketSnapshot
 from engine.domain.types import AssetClass, Mode, Side
 from engine.eventlog.postgres import PostgresEventStore, migrate
+from engine.llm.evaluate import compare_models, format_report, score_calls, summarise
+from engine.llm.recorder import PostgresLLMRecorder
+from engine.marketdata.alpaca import AlpacaBars
 from engine.marketdata.recorder import PostgresQuoteRecorder
 from engine.projections.account import AccountProjector
 from engine.risk.config import disposable_money_preset, replace
@@ -34,8 +37,10 @@ from engine.service.executor import Executor, Intervals
 from engine.service.health import HealthServer
 from engine.service.inbox import PostgresInbox, submit_to_inbox
 from engine.service.leader import PostgresLeaderLock
+from engine.service.llm_wiring import build_llm_deps
 from engine.service.logging_setup import configure_logging
 from engine.service.runtime import AccountRuntime, build_runtime
+from engine.strategy.approvals import ApprovalError, PostgresProposalStore, approve, reject
 
 log = logging.getLogger("engine.cli")
 
@@ -79,6 +84,10 @@ def _parser() -> argparse.ArgumentParser:
         ("adjust", "record an operator-approved ledger correction"),
         ("submit-intent", "queue a manual trade intent (the running service decides and executes it)"),
         ("show", "show what happened to one intent: decision, orders, fills"),
+        ("llm-report", "score recorded model decisions on later prices and compare the models"),
+        ("proposals", "list trade ideas from LLM strategies waiting for your approval"),
+        ("approve", "approve a pending proposal: it is queued as an intent and still faces the risk engine"),
+        ("reject", "reject a pending proposal"),
         ("quotes", "print the live quote, spread estimate and risk-relevant facts for an account's symbols"),
     ):
         sp = sub.add_parser(name, help=help_)
@@ -103,6 +112,14 @@ def _parser() -> argparse.ArgumentParser:
                 "--ttl-minutes", type=int, default=10, help="the intent expires if not decided by then"
             )
             sp.add_argument("--dry-run", action="store_true", help="print the intent without queueing it")
+        if name == "llm-report":
+            sp.add_argument("--days", type=int, default=30)
+            sp.add_argument(
+                "--horizon-bars", type=int, default=24, help="bars to hold when scoring a decision"
+            )
+            sp.add_argument("--timeframe", default="1h")
+        if name in ("approve", "reject"):
+            sp.add_argument("--id", required=True, help="the proposal id (shown by `proposals`)")
         if name == "show":
             sp.add_argument("--intent-id", required=True)
         if name == "quotes":
@@ -129,6 +146,10 @@ def _control_command(
                 f"anomalies={len(st.anomalies)}"
             )
         return 0
+    if args.command == "llm-report":
+        return _llm_report(args, cfg, secrets, clock)
+    if args.command in ("proposals", "approve", "reject"):
+        return _proposals_command(args, secrets, clock)
     if args.command != "quotes" and args.account not in {a.id for a in cfg.accounts}:
         print(f"error: unknown account {args.account!r}", file=sys.stderr)
         return 2
@@ -181,27 +202,38 @@ def _run(cfg: ServiceConfig, secrets: Secrets) -> int:
     store = PostgresEventStore(dsn)
     paper_state = PostgresPaperState(dsn)
     base_risk = replace(disposable_money_preset(), cfg.risk)
+    sinks: list[AlertSink] = [LogAlertSink()]
+    if secrets.discord_webhook is not None:
+        sinks.append(DiscordWebhookSink(secrets.discord_webhook, clock))
+    alerts = MultiAlertSink(sinks)
+    llm_deps = build_llm_deps(cfg.llm, secrets, store, clock, alerts, dsn=dsn) if cfg.llm else None
     runtimes: list[AccountRuntime] = []
     for acct in cfg.accounts:
         if not acct.enabled:
             log.info("account %s is disabled", acct.id)
             continue
         runtimes.append(
-            build_runtime(acct, store, clock, secrets, paper_state=paper_state, base_risk=base_risk)
+            build_runtime(
+                acct,
+                store,
+                clock,
+                secrets,
+                paper_state=paper_state,
+                base_risk=base_risk,
+                llm=cfg.llm,
+                llm_deps=llm_deps,
+            )
         )
     if not runtimes:
         print("error: no enabled accounts", file=sys.stderr)
         return 2
 
-    sinks: list[AlertSink] = [LogAlertSink()]
-    if secrets.discord_webhook is not None:
-        sinks.append(DiscordWebhookSink(secrets.discord_webhook, clock))
     executor = Executor(
         store,
         runtimes,
         PostgresInbox(dsn),
         PostgresLeaderLock(dsn),
-        MultiAlertSink(sinks),
+        alerts,
         clock,
         intervals=Intervals(),
         alert_on_fills=cfg.alert_on_fills,
@@ -221,6 +253,61 @@ def _run(cfg: ServiceConfig, secrets: Secrets) -> int:
             health.stop()
         store.close()
     return 0
+
+
+def _llm_report(args: argparse.Namespace, cfg: ServiceConfig, secrets: Secrets, clock: SystemClock) -> int:
+    creds = secrets.alpaca_paper or secrets.alpaca_live
+    if creds is None:
+        print("error: llm-report needs Alpaca credentials to fetch prices", file=sys.stderr)
+        return 2
+    recorder = PostgresLLMRecorder(secrets.database_url.get_secret_value())
+    now = clock.now()
+    calls = recorder.calls_since(now - timedelta(days=args.days))
+    if not calls:
+        print("no recorded model calls in that period")
+        return 0
+    history = AlpacaBars(creds[0], creds[1], clock)
+    symbols = sorted({d["symbol"] for c in calls for d in c.decisions or []})
+    start = min(c.ts for c in calls) - timedelta(days=2)
+    bars = {s: history.bars(s, args.timeframe, start, now) for s in symbols}
+    cutoffs = {
+        n: p.knowledge_cutoff for n, p in (cfg.llm.providers.items() if cfg.llm else []) if p.knowledge_cutoff
+    }
+    scored, pending = score_calls(calls, bars, horizon_bars=args.horizon_bars, cutoffs=cutoffs)
+    stats, agreement = compare_models(calls)
+    print(format_report(summarise(scored, pending), stats, agreement, args.horizon_bars))
+    return 0
+
+
+def _proposals_command(args: argparse.Namespace, secrets: Secrets, clock: SystemClock) -> int:
+    dsn = secrets.database_url.get_secret_value()
+    proposals = PostgresProposalStore(dsn)
+    try:
+        now = clock.now()
+        if args.command == "proposals":
+            pending = proposals.pending(now)
+            if not pending:
+                print("no proposals waiting")
+            for p in pending:
+                i = p.intent
+                mins = int((p.expires_at - now).total_seconds() // 60)
+                print(f"{p.proposal_id}  {i.side} {i.quantity} {i.symbol} stop {i.stop_loss_price}  "
+                      f"expires in {mins} min\n    why: {p.thesis}\n    news: {', '.join(p.cited)}")  # fmt: skip
+            return 0
+        try:
+            if args.command == "approve":
+                intent = approve(proposals, args.id, now, lambda i: submit_to_inbox(dsn, i))
+                print(f"approved: {intent.side} {intent.quantity} {intent.symbol}. Queued; the risk engine "
+                      f"still decides. Follow it:  show --account {intent.account_id} --intent-id {intent.intent_id}")  # fmt: skip
+            else:
+                reject(proposals, args.id, now)
+                print("rejected")
+        except ApprovalError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        return 0
+    finally:
+        proposals.close()
 
 
 def _submit_intent(args: argparse.Namespace, secrets: Secrets, clock: SystemClock) -> int:

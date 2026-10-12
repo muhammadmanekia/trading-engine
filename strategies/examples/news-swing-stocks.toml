@@ -1,0 +1,40 @@
+# An LLM strategy: a model reads fresh news about a few large-cap stocks and PROPOSES trades.
+# Starts in propose_only mode: nothing is traded until you approve a proposal.
+type = "llm"
+id = "news-swing-stocks"
+version = 1
+description = "Large-cap stocks, news-driven swing trades held for days"
+universe = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL"]
+timeframe = "1h"
+review_on_bar_close = false      # act on news only, not on a schedule
+
+instructions = """
+Trade only on genuinely new, company-specific information from credible sources: earnings and guidance
+surprises, regulatory or legal decisions, major contracts, product launches, management changes.
+Ignore generic market commentary, analyst rating reiterations, opinion pieces and anything already reflected in
+the price move shown in the data. Prefer to hold. We want a small number of high-conviction long trades held
+for days, never day trades.
+"""
+
+[news]
+lookback_hours = 24
+max_items = 12
+min_citations = 1
+
+[models]
+primary = "claude"          # a provider defined in the [llm.providers] section of the service config
+shadow = ["grok"]           # also asked, recorded, scored later, but never acts
+mode = "propose_only"       # propose_only | auto | shadow_only
+consensus = false           # true: act only when every listed model agrees
+
+[limits]
+min_confidence = 0.65
+max_entries_per_day = 2
+min_stop_pct = 0.02
+max_stop_pct = 0.08
+max_calls_per_day = 40
+daily_usd = 1.0
+proposal_ttl_minutes = 30
+
+[sizing]
+max_notional = 1000          # the most this strategy will ever put into one position, in dollars

@@ -3,6 +3,9 @@
 Event-sourced, fail-closed trading engine.
 
 * **Phase 1:** event log, risk engine, order manager, mock broker.
+* **Phase 4:** LLM strategies and a news listener: Claude and Grok behind one interface, strict output schema,
+  prompt-injection defences, propose-only mode with human approval, token and dollar budgets, a full audit trail,
+  and forward evaluation. See [docs/llm-strategies.md](docs/llm-strategies.md).
 * **Phase 3:** rule strategies as TOML files, a backtester that runs the real risk engine and order manager,
   walk-forward / sensitivity checks, a live strategy runner, and a replay tool that measures how closely the
   simulator tracked a real run. See [docs/strategies.md](docs/strategies.md).

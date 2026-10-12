@@ -5,6 +5,9 @@ Skipped unless RUN_LIVE_TESTS=1 and the relevant credentials are in the environm
 
 * live_paper     : Alpaca PAPER account. Places and cancels far-from-market limit orders ($1 AAPL). No real money.
 * live_robinhood : Robinhood Crypto, READ-ONLY. Signs requests, reads account/holdings/quotes. Places NOTHING.
+* live_news      : Alpaca news, READ-ONLY.
+* live_anthropic / live_xai : ONE tiny structured call each (a few hundred tokens). They prove the request shape
+                   and response parsing against the real service. Models: LIVE_ANTHROPIC_MODEL / LIVE_XAI_MODEL.
 """
 
 from __future__ import annotations
@@ -113,3 +116,66 @@ def test_alpaca_historical_bars_for_stocks_and_crypto() -> None:
     hourly = bars.bars("BTC-USD", "1h", now - timedelta(days=3), now)  # crypto trades around the clock
     assert len(hourly) >= 48 and hourly == sorted(hourly, key=lambda b: b.ts)
     assert hourly[-1].ts + timedelta(hours=1) <= now  # never the bar still forming
+
+
+@pytest.mark.live_news
+def test_alpaca_news_returns_parseable_items() -> None:
+    from datetime import timedelta
+
+    from engine.marketdata.alpaca_news import AlpacaNewsFeed
+
+    key, secret = os.environ.get("ALPACA_PAPER_KEY_ID"), os.environ.get("ALPACA_PAPER_SECRET")
+    if not (LIVE and key and secret):
+        pytest.skip("set RUN_LIVE_TESTS=1, ALPACA_PAPER_KEY_ID and ALPACA_PAPER_SECRET")
+    clock = SystemClock()
+    items = AlpacaNewsFeed(SecretStr(key), SecretStr(secret)).fetch(
+        clock.now() - timedelta(days=3), ["AAPL", "MSFT", "NVDA"], clock.now()
+    )
+    assert items, (
+        "no news in three days for AAPL/MSFT/NVDA: unexpected, check the account's data subscription"
+    )
+    first = items[0]
+    assert first.headline and first.published_at.tzinfo is not None and first.symbols
+
+
+def _structured_request():  # type: ignore[no-untyped-def]
+    from engine.llm.provider import LLMRequest
+    from engine.strategy.llm_schema import DECISIONS_JSON_SCHEMA, SCHEMA_NAME
+
+    return LLMRequest(
+        system="You are a cautious analyst. Reply only in the required structure.",
+        user='<news_item id="n1">Apple reports record quarterly revenue.</news_item>\n'
+        "Universe: AAPL. Position: flat. Decide.",
+        schema_name=SCHEMA_NAME,
+        json_schema=DECISIONS_JSON_SCHEMA,
+        max_output_tokens=400,
+    )
+
+
+def _check_reply(resp) -> None:  # type: ignore[no-untyped-def]
+    from engine.strategy.llm_schema import parse_decisions
+
+    assert resp.input_tokens > 0 and resp.output_tokens > 0 and resp.model_reported
+    parse_decisions(resp.parsed)  # the real model's output passes OUR strict schema
+
+
+@pytest.mark.live_anthropic
+def test_claude_returns_schema_valid_decisions() -> None:
+    from engine.llm.anthropic import AnthropicProvider
+
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if not (LIVE and key):
+        pytest.skip("set RUN_LIVE_TESTS=1 and ANTHROPIC_API_KEY")
+    model = os.environ.get("LIVE_ANTHROPIC_MODEL", "claude-haiku-5-5")
+    _check_reply(AnthropicProvider(SecretStr(key), model).complete(_structured_request()))
+
+
+@pytest.mark.live_xai
+def test_grok_returns_schema_valid_decisions() -> None:
+    from engine.llm.xai import XAIProvider
+
+    key = os.environ.get("XAI_API_KEY")
+    if not (LIVE and key):
+        pytest.skip("set RUN_LIVE_TESTS=1 and XAI_API_KEY")
+    model = os.environ.get("LIVE_XAI_MODEL", "grok-4")
+    _check_reply(XAIProvider(SecretStr(key), model).complete(_structured_request()))

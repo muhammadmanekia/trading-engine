@@ -9,8 +9,8 @@ opt-in live paper test validates the fake against the real API.
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from collections import deque
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -45,6 +45,7 @@ class FakeAlpaca:
         self.history: dict[
             str, list[Any]
         ] = {}  # canonical symbol -> Bars served by the historical-bars routes
+        self.news: list[dict[str, Any]] = []  # raw Alpaca news rows served by /v1beta1/news
         self.bars_page = 3  # tiny pages so pagination is always exercised
         self._faults: deque[SubmitFault] = deque()
         self.requests: list[tuple[str, str]] = []
@@ -144,6 +145,8 @@ class FakeAlpaca:
                     "fractionable": True,
                 },
             )
+        if method == "GET" and path == "/v1beta1/news":
+            return self._news(params)
         if method == "GET" and path == "/v2/clock":
             return httpx.Response(
                 200, json={"is_open": self.market_open, "next_open": "x", "next_close": "y"}
@@ -174,6 +177,19 @@ class FakeAlpaca:
             "next_page_token": str(offset + self.bars_page) if more else None,
         }  # fmt: skip
         return httpx.Response(200, json=body)
+
+    def _news(self, params: dict[str, str]) -> httpx.Response:
+        wanted = set(params.get("symbols", "").split(","))
+        rows = [
+            n for n in self.news if wanted & set(n["symbols"]) and n["created_at"] >= params.get("start", "")
+        ]
+        limit = int(params.get("limit", "50"))
+        offset = int(params.get("page_token") or 0)
+        page = rows[offset : offset + limit]
+        more = offset + limit < len(rows)
+        return httpx.Response(
+            200, json={"news": page, "next_page_token": str(offset + limit) if more else None}
+        )
 
     def _ts(self) -> str:
         return self.clock.now().strftime("%Y-%m-%dT%H:%M:%S") + ".123456789Z"

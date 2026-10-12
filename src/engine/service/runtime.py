@@ -24,16 +24,20 @@ from engine.domain.market import MarketSnapshot, SystemState
 from engine.domain.types import AssetClass, Mode
 from engine.eventlog.base import EventStore
 from engine.marketdata.alpaca import AlpacaBars, AlpacaMarketData
+from engine.marketdata.alpaca_news import AlpacaNewsFeed
 from engine.marketdata.base import MarketDataError, MarketDataProvider
 from engine.marketdata.history import HistoricalData
 from engine.marketdata.robinhood import RobinhoodMarketData
+from engine.news.listener import NewsListener
 from engine.projections.account import AccountState
 from engine.reconciler import Reconciler
 from engine.risk.config import RiskConfig, disposable_money_preset, merge
-from engine.service.config import AccountConfig, Secrets
+from engine.service.config import AccountConfig, LLMConfig, Secrets
+from engine.strategy.llm_schema import LLMStrategyDef, load_any_strategy
+from engine.strategy.llm_source import LLMDeps, LLMStrategySource
 from engine.strategy.runner import StrategyRunner
-from engine.strategy.schema import StrategyDef, load_strategy, validate_for_venue
-from engine.strategy.source import RuleStrategySource
+from engine.strategy.schema import StrategyDef, validate_for_venue
+from engine.strategy.source import RuleStrategySource, SignalSource
 
 
 class LiveNotAllowed(Exception):
@@ -214,16 +218,40 @@ def build_runtime(
     *,
     paper_state: PaperStateStore | None = None,
     base_risk: RiskConfig | None = None,
+    llm: LLMConfig | None = None,
+    llm_deps: LLMDeps | None = None,
 ) -> AccountRuntime:
     """The real broker + market data for an account, plus its strategies (if any) wired to a StrategyRunner."""
     rt = _build_base(cfg, store, clock, secrets, paper_state=paper_state, base_risk=base_risk)
-    if cfg.rules:
+    if cfg.rules or cfg.llm_strategies:
         creds = secrets.alpaca_live if cfg.mode is Mode.LIVE else secrets.alpaca_paper
         creds = creds or secrets.alpaca_paper or secrets.alpaca_live
         if creds is None:
             raise ValueError(f"{cfg.id}: strategies need Alpaca data credentials for historical bars")
         history = AlpacaBars(creds[0], creds[1], clock)
-        attach_rules(rt, [load_strategy(p) for p in cfg.rules], history, clock, base_risk=base_risk)
+        rules: list[StrategyDef] = []
+        llms: list[LLMStrategyDef] = []
+        for path in (*cfg.rules, *cfg.llm_strategies):
+            loaded = load_any_strategy(path)
+            (llms if isinstance(loaded, LLMStrategyDef) else rules).append(loaded)  # type: ignore[arg-type]
+        listener = None
+        if llms:
+            if llm is None or llm_deps is None:
+                raise ValueError(f"{cfg.id}: llm_strategies need an [llm] section in the service config")
+            feed = AlpacaNewsFeed(creds[0], creds[1])
+            listener = NewsListener(
+                feed,
+                llm_deps.archive,
+                clock,
+                sorted({s for st in llms for s in st.universe}),
+                notify=llm_deps.notify,
+                max_age=timedelta(minutes=llm.news_max_age_minutes),
+            )
+        attach_strategies(
+            rt, rules, history, clock, base_risk=base_risk, llms=llms, llm_deps=llm_deps, listener=listener,
+            news_interval=timedelta(seconds=llm.news_poll_s) if llm else timedelta(seconds=30),
+            news_max_age=timedelta(minutes=llm.news_max_age_minutes) if llm else timedelta(hours=2),
+        )  # fmt: skip
     return rt
 
 
@@ -236,10 +264,33 @@ def attach_rules(
     base_risk: RiskConfig | None = None,
     min_interval: timedelta = timedelta(seconds=30),
 ) -> StrategyRunner:
-    """Validate strategies against this account's venue and attach a runner for them."""
+    return attach_strategies(rt, strategies, history, clock, base_risk=base_risk, min_interval=min_interval)
+
+
+def attach_strategies(
+    rt: AccountRuntime,
+    strategies: list[StrategyDef],
+    history: HistoricalData,
+    clock: Clock,
+    *,
+    base_risk: RiskConfig | None = None,
+    min_interval: timedelta = timedelta(seconds=30),
+    llms: list[LLMStrategyDef] | None = None,
+    llm_deps: LLMDeps | None = None,
+    listener: NewsListener | None = None,
+    news_interval: timedelta = timedelta(seconds=30),
+    news_max_age: timedelta = timedelta(hours=2),
+) -> StrategyRunner:
+    """Validate strategies against this account's venue and attach one runner for all of them."""
+    venue = _venue_class(rt)
     for strategy in strategies:
-        validate_for_venue(strategy, rt.broker.protection, _venue_class(rt))
-    sources = [RuleStrategySource(s, rt.cfg.id) for s in strategies]
+        validate_for_venue(strategy, rt.broker.protection, venue)
+    sources: list[SignalSource] = [RuleStrategySource(s, rt.cfg.id) for s in strategies]
+    for ls in llms or []:
+        if ls.asset_class is not venue:
+            raise ValueError(f"{ls.id}: trades {ls.asset_class} but account {rt.cfg.id} trades {venue}")
+        assert llm_deps is not None
+        sources.append(LLMStrategySource(ls, rt.cfg.id, llm_deps))
 
     def budget(name: str, state: AccountState, snapshot: MarketSnapshot) -> Decimal:
         risk = merge(base_risk or disposable_money_preset(), rt.cfg.risk, rt.cfg.strategies.get(name))
@@ -247,7 +298,10 @@ def attach_rules(
             risk.strategy_budget if risk.strategy_budget is not None else state.equity(snapshot.price_map())
         )
 
-    rt.runner = StrategyRunner(sources, history, rt.core, rt.market, clock, budget, min_interval=min_interval)
+    rt.runner = StrategyRunner(
+        sources, history, rt.core, rt.market, clock, budget, min_interval=min_interval,
+        news=listener, news_interval=news_interval, news_max_age=news_max_age,
+    )  # fmt: skip
     return rt.runner
 
 

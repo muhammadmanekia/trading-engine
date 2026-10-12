@@ -24,7 +24,7 @@ from engine.eventlog.memory import InMemoryEventStore
 from engine.marketdata.history import Bar, close_time, timeframe_delta, validate_bars
 from engine.projections.account import AccountState
 from engine.risk.config import RiskConfig
-from engine.strategy.schema import validate_for_venue
+from engine.strategy.schema import StrategyDef, validate_for_venue
 from engine.strategy.source import Decision, SignalSource, SourceContext
 
 ZERO = Decimal(0)
@@ -110,7 +110,7 @@ class BacktestEngine:
             self.warnings += [f"{sym}: {w}" for w in validate_bars(bars, self.timeframe)]
         for src in sources:  # fail at load time what the venue cannot do, not as a rejected order mid-run
             strategy = getattr(src, "strategy", None)
-            if strategy is not None:
+            if isinstance(strategy, StrategyDef):  # rule strategies carry venue-specific constraints
                 validate_for_venue(strategy, config.venue.protection, config.venue.asset_class)
         missing = {sym for s in sources for sym in s.symbols} - set(self.data)
         if missing:

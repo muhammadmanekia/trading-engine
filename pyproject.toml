@@ -25,6 +25,9 @@ addopts = "-q"
 markers = [
     "live_paper: hits the real Alpaca paper API (needs ALPACA_PAPER_KEY_ID/SECRET); skipped by default",
     "live_robinhood: hits the real Robinhood Crypto API, read-only; skipped by default",
+    "live_news: reads real Alpaca news (needs the Alpaca keys); skipped by default",
+    "live_anthropic: makes one tiny real Claude call (needs ANTHROPIC_API_KEY); costs a fraction of a cent",
+    "live_xai: makes one tiny real Grok call (needs XAI_API_KEY); costs a fraction of a cent",
 ]
 
 [tool.mypy]

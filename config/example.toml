@@ -1,7 +1,8 @@
 # Execution service configuration. Copy to config/local.toml (git-ignored) and edit.
 # Secrets are NEVER in this file; they come from environment variables (see README):
 #   ENGINE_DATABASE_URL, ALPACA_PAPER_KEY_ID/SECRET, ALPACA_LIVE_KEY_ID/SECRET,
-#   ROBINHOOD_API_KEY/PRIVATE_KEY, DISCORD_WEBHOOK_URL, ENGINE_ALLOW_LIVE
+#   ROBINHOOD_API_KEY/PRIVATE_KEY, DISCORD_WEBHOOK_URL, ENGINE_ALLOW_LIVE,
+#   ANTHROPIC_API_KEY, XAI_API_KEY (only if you use LLM strategies)
 
 [service]
 poll_interval_s = 2
@@ -18,6 +19,29 @@ record_quotes = true         # keep price/spread history so backtests can use th
 daily_loss_cap_pct = 0.25
 max_consecutive_losses = 8
 
+# ---- Language models (only used by LLM strategies; see docs/llm-strategies.md) -------------------
+# Spending caps are enforced BEFORE each call; when one would be crossed the call is simply not made.
+[llm]
+daily_usd = 2
+monthly_usd = 30
+news_poll_s = 30
+news_max_age_minutes = 120    # headlines older than this are archived but never traded on
+
+# Prices are USD per million tokens. Look them up and keep them current: if a provider has no price here the
+# budget assumes an expensive default, so a forgotten price makes the bot cautious, not reckless.
+[llm.providers.claude]
+kind = "anthropic"
+model = "claude-sonnet-5-5"
+knowledge_cutoff = 2026-01-31      # check the model card; used to flag possibly leaked backtests
+input_per_mtok = 3.0
+output_per_mtok = 15.0
+
+[llm.providers.grok]
+kind = "xai"
+model = "grok-4"
+# input_per_mtok = ...
+# output_per_mtok = ...
+
 # ---- US stocks on a NEW Alpaca account, paper first ---------------------------------------------
 [[accounts]]
 id = "alpaca-paper"
@@ -25,6 +49,7 @@ broker = "alpaca"
 mode = "PAPER"
 symbols = ["AAPL", "MSFT", "NVDA"]   # always quoted; stocks trade whole shares only
 rules = []                            # strategy files to run here, e.g. ["strategies/examples/rsi-dip-stocks.toml"]
+llm_strategies = []                   # e.g. ["strategies/examples/news-swing-stocks.toml"]; needs the [llm] section
 # The free IEX feed reports only IEX's slice of consolidated volume. Scale it up so the liquidity floor
 # means what it says (an estimate: tune it, or move to the SIP feed and set this back to 1).
 volume_scale = 25

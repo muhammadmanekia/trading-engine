@@ -187,6 +187,29 @@ class DriftDetected(Frozen):
     broker_value: str | None = None
 
 
+class LlmDecisionMade(Frozen):
+    """Audit record of one model decision. The full prompt and reply live in the llm_calls table; this event
+    carries their hashes, so the hash-chained log proves which prompt and reply led to what."""
+
+    account_id: str
+    strategy_id: str
+    call_id: str
+    provider: str
+    model: str
+    mode: Literal["primary", "shadow"]
+    prompt_name: str
+    prompt_version: str
+    prompt_hash: str
+    input_hash: str
+    response_hash: str | None = None
+    symbol: str | None = None
+    action: str | None = None
+    confidence: Dec | None = None
+    outcome: Literal["intent", "proposal", "shadow", "hold", "rejected", "invalid", "error"]
+    reason: str = ""
+    cost_usd: NonNegDec = Decimal(0)
+
+
 class AnomalyDetected(Frozen):
     account_id: str
     order_id: str | None = None
@@ -217,5 +240,6 @@ EVENT_MODELS: dict[str, type[Frozen]] = {
         LedgerAdjusted,
         ReconciliationCompleted,
         DriftDetected,
+        LlmDecisionMade,
     )
 }
