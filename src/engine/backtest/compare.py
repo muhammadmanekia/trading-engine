@@ -271,12 +271,19 @@ class Verdict:
     flags: tuple[str, ...]
 
 
+def _beat(w: WindowScore) -> bool:
+    """Holding cash because nothing qualified is not a win, even when it beats a falling benchmark."""
+    return not w.sat_out and w.excess > 0
+
+
 def _won(windows: Sequence[WindowScore]) -> int:
-    return sum(1 for w in windows if w.excess > 0)
+    return sum(1 for w in windows if _beat(w))
 
 
 def judge(base: Evaluation, stress: Evaluation, p: Protocol, exam_status: ExamStatus) -> Verdict:
     n = len(base.windows)
+    if n == 0:
+        raise ValueError("no rolling windows to judge")
     need = required_wins(n)
     won, stress_won = _won(base.windows), _won(stress.windows)
     trades = sum(w.trades for w in base.windows) + (base.exam.trades if base.exam else 0)
@@ -284,10 +291,14 @@ def judge(base: Evaluation, stress: Evaluation, p: Protocol, exam_status: ExamSt
     exam_ok: bool | None = None
     exam_detail = "not run (use --final-exam)"
     if base.exam is not None:
-        exam_ok = base.exam.excess > 0
-        exam_detail = f"{base.exam.strategy_return:.2%} vs buy-and-hold {base.exam.benchmark_return:.2%}"
+        exam_ok = _beat(base.exam)
+        exam_detail = (
+            "held cash: no parameter set qualified on the training window"
+            if base.exam.sat_out
+            else f"{base.exam.strategy_return:.2%} vs buy-and-hold {base.exam.benchmark_return:.2%}"
+        )
     # without an exam there is nothing to stress on the exam side, so the check cannot be assessed
-    stress_ok: bool | None = None if stress.exam is None else (stress_won >= need and stress.exam.excess > 0)
+    stress_ok: bool | None = None if stress.exam is None else (stress_won >= need and _beat(stress.exam))
     stress_detail = f"{stress_won}/{n} windows" + (
         f", exam {stress.exam.strategy_return:.2%} vs {stress.exam.benchmark_return:.2%}"
         if stress.exam

@@ -362,6 +362,47 @@ def test_big_drawdowns_and_sat_out_windows_are_flagged_but_do_not_decide() -> No
     assert any("held cash" in f for f in judge(sat, sat, PROTO_RULES, "not run").flags)
 
 
+def held_cash(label: str, bench: str = "-0.10") -> WindowScore:
+    """A period where no parameter set qualified: the strategy held cash while the benchmark fell."""
+    return WindowScore(label, T0, T0, D(0), D(bench), 0, D(0), {}, sat_out=True)
+
+
+def test_holding_cash_through_a_falling_exam_does_not_count_as_beating_buy_and_hold() -> None:
+    ev = passing()
+    sat_exam = Evaluation(ev.strategy_id, ev.strategy_hash, ev.windows, held_cash("final exam"))
+    assert sat_exam.exam is not None and sat_exam.exam.excess > 0  # cash beat a falling market on paper
+    v = judge(sat_exam, ev, PROTO_RULES, "clean")
+    assert check(v, "final exam") is False and v.label == "NOT PROVEN"
+    assert (
+        "held cash: no parameter set qualified on the training window"
+        in dict((n, d) for n, _, d in v.checks)["beats buy-and-hold on the final exam"]
+    )
+
+
+def test_windows_spent_in_cash_never_count_as_wins_even_when_the_benchmark_falls() -> None:
+    def with_cash(real_wins: int, cash_windows: int) -> Evaluation:
+        real = [score(f"window {i}", "0.02") for i in range(1, real_wins + 1)]
+        lost = [score(f"window {i}", "-0.02") for i in range(len(real) + 1, 5 - cash_windows)]
+        cash = [held_cash(f"window {i}") for i in range(5 - cash_windows, 5)]
+        return Evaluation("s", "h", (*real, *lost, *cash), score("final exam", "0.04", trades=30))
+
+    # 3 of 4 is the boundary: three real wins pass, two real wins plus two cash windows do not
+    three = with_cash(3, 1)
+    assert check(judge(three, three, PROTO_RULES, "clean"), "windows") is True
+    two = with_cash(2, 2)
+    v = judge(two, two, PROTO_RULES, "clean")
+    assert check(v, "windows") is False and check(v, "x costs") is False and v.label == "NOT PROVEN"
+    # the cost-stress side is held to the same rule on its own windows
+    v = judge(three, two, PROTO_RULES, "clean")
+    assert check(v, "windows") is True and check(v, "x costs") is False
+
+
+def test_judging_without_rolling_windows_is_an_error() -> None:
+    empty = Evaluation("s", "h", (), score("final exam", "0.04"))
+    with pytest.raises(ValueError, match="no rolling windows to judge"):
+        judge(empty, empty, PROTO_RULES, "clean")
+
+
 def test_the_scoreboard_names_the_verdict_every_check_and_every_window() -> None:
     ev = passing()
     v = judge(ev, ev, PROTO_RULES, "clean")
