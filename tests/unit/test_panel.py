@@ -156,9 +156,11 @@ def test_state_lists_accounts_and_never_exposes_secrets(
 def test_a_button_runs_the_real_command_and_redacts_secrets(
     panel: Panel, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("ENGINE_DATABASE_URL", raising=False)
+    # an explicit (unreachable) URL beats any real .env, so the test never touches a real database
+    monkeypatch.setenv("ENGINE_DATABASE_URL", "postgresql://u:hunter2secret@127.0.0.1:1/none")
     status, res = call(panel, "/api/run", body={"action": "status"}, token=panel.token)
-    assert status == 200 and res["ok"] is False and "ENGINE_DATABASE_URL is required" in res["output"]
+    assert status == 200 and res["ok"] is False and res["code"] != 0
+    assert "hunter2secret" not in res["output"]
     from engine.service.panel import _redact
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-supersecretvalue")
