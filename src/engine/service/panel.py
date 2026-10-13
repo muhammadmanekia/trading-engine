@@ -135,7 +135,7 @@ class ServiceProcess:
             if self.running():
                 return "already running"
             self.log_path.parent.mkdir(exist_ok=True)
-            log = self.log_path.open("ab")
+            log = self.log_path.open("wb")  # each start begins a fresh log
             self._proc = subprocess.Popen(  # noqa: S603  (fixed argv, no user input)
                 [sys.executable, "-m", "engine.service", "run", "--config", self._cfg_path],
                 cwd=self._root, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
