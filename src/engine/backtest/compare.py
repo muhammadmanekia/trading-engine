@@ -262,7 +262,8 @@ def judge(base: Evaluation, stress: Evaluation, p: Protocol, exam_status: ExamSt
     if base.exam is not None:
         exam_ok = base.exam.excess > 0
         exam_detail = f"{base.exam.strategy_return:.2%} vs buy-and-hold {base.exam.benchmark_return:.2%}"
-    stress_ok = stress_won >= need and (stress.exam is None or stress.exam.excess > 0)
+    # without an exam there is nothing to stress on the exam side, so the check cannot be assessed
+    stress_ok: bool | None = None if stress.exam is None else (stress_won >= need and stress.exam.excess > 0)
     stress_detail = f"{stress_won}/{n} windows" + (
         f", exam {stress.exam.strategy_return:.2%} vs {stress.exam.benchmark_return:.2%}"
         if stress.exam

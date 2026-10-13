@@ -324,6 +324,7 @@ def test_an_exam_that_was_not_run_cannot_pass() -> None:
     no_exam = evaluation(["0.02", "0.01", "0.03", "0.02"], None)
     v = judge(no_exam, no_exam, PROTO_RULES, "not run")
     assert v.label == "EXAM NOT RUN" and check(v, "final exam") is None
+    assert check(v, "x costs") is None  # nothing was stressed on the exam, so it is not reported as met
 
 
 def test_a_strategy_edited_after_its_exam_never_passes() -> None:
