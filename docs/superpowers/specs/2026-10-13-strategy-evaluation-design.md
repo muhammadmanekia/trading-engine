@@ -42,7 +42,8 @@ drawdown, Sharpe ratio, number of trades, and fraction of time invested.
 ## "Beats buy-and-hold" (all four must hold)
 
 1. **Final exam:** net return on the untouched test period (about mid-2024 to now) exceeds the benchmark's.
-2. **Rolling windows:** excess return is positive in at least two thirds of the windows.
+2. **Rolling windows:** excess return is positive in at least two thirds of the windows (with the ~4 windows that
+   mid-2020 to mid-2024 allows, that means at least 3 of 4).
 3. **Trade count:** at least 30 trades across all windows, so the result is not one lucky position.
 4. **Cost stress:** conditions 1 and 2 still hold with spread and slippage doubled.
 
@@ -62,7 +63,7 @@ strategy gets only a small grid of settings, which limits over-fitting.
 
 ## Data flow
 
-Cached daily bars for the 25 stocks → rolling windows (tune on 2 to 3 years, score on the next 6 to 12 months;
+Cached daily bars for the 25 stocks → rolling windows (tune on 2 years, score on the next 6 months, then step forward 6 months;
 windows never overlap with what they are scored on) → each strategy on each window, plus a doubled-cost rerun →
 scoreboard. The final exam runs only with `--final-exam`, after the rolling stage.
 
