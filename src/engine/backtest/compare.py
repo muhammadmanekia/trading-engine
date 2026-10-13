@@ -236,3 +236,60 @@ class ExamLedger:
         with os.fdopen(fd, "w") as fh:
             json.dump(self._data, fh, indent=2)
         os.replace(tmp, self._path)  # atomic: a crash never leaves a half-written ledger
+
+
+@dataclass(frozen=True)
+class Verdict:
+    label: Literal["PASS", "NOT PROVEN", "EXAM NOT RUN", "EXAM ALREADY SEEN"]
+    checks: tuple[
+        tuple[str, bool | None, str], ...
+    ]  # (condition, met?, detail); None = could not be assessed
+    flags: tuple[str, ...]
+
+
+def _won(windows: Sequence[WindowScore]) -> int:
+    return sum(1 for w in windows if w.excess > 0)
+
+
+def judge(base: Evaluation, stress: Evaluation, p: Protocol, exam_status: ExamStatus) -> Verdict:
+    n = len(base.windows)
+    need = required_wins(n)
+    won, stress_won = _won(base.windows), _won(stress.windows)
+    trades = sum(w.trades for w in base.windows) + (base.exam.trades if base.exam else 0)
+
+    exam_ok: bool | None = None
+    exam_detail = "not run (use --final-exam)"
+    if base.exam is not None:
+        exam_ok = base.exam.excess > 0
+        exam_detail = f"{base.exam.strategy_return:.2%} vs buy-and-hold {base.exam.benchmark_return:.2%}"
+    stress_ok = stress_won >= need and (stress.exam is None or stress.exam.excess > 0)
+    stress_detail = f"{stress_won}/{n} windows" + (
+        f", exam {stress.exam.strategy_return:.2%} vs {stress.exam.benchmark_return:.2%}"
+        if stress.exam
+        else ""
+    )
+    checks = (
+        ("beats buy-and-hold on the final exam", exam_ok, exam_detail),
+        (f"wins at least {need} of {n} rolling windows", won >= need, f"won {won}/{n}"),
+        (f"at least {p.min_trades} trades", trades >= p.min_trades, f"{trades} trades"),
+        (f"still wins with {p.cost_multiplier}x costs", stress_ok, stress_detail),
+    )
+
+    scored = [*base.windows, *([base.exam] if base.exam else [])]
+    flags = [
+        f"{w.label}: drawdown {w.max_drawdown:.0%} exceeds {p.drawdown_flag:.0%}"
+        for w in scored
+        if w.max_drawdown > p.drawdown_flag
+    ]
+    sat = [w.label for w in scored if w.sat_out]
+    if sat:
+        flags.append(f"{', '.join(sat)}: no parameter set qualified, so the strategy held cash")
+
+    label: Literal["PASS", "NOT PROVEN", "EXAM NOT RUN", "EXAM ALREADY SEEN"]
+    if exam_status == "seen by an earlier version":
+        label = "EXAM ALREADY SEEN"
+    elif base.exam is None:
+        label = "EXAM NOT RUN"
+    else:
+        label = "PASS" if all(ok for _, ok, _ in checks) else "NOT PROVEN"
+    return Verdict(label, checks, tuple(flags))

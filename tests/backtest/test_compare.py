@@ -10,10 +10,14 @@ from typing import Any
 import pytest
 
 from engine.backtest.compare import (
+    Evaluation,
     ExamLedger,
     Protocol,
+    Verdict,
+    WindowScore,
     WindowSpan,
     evaluate,
+    judge,
     required_wins,
     rolling_spans,
     stressed,
@@ -59,6 +63,7 @@ LOOSE = disposable_money_preset().model_copy(
     update={"max_consecutive_losses": 1000, "daily_loss_cap_pct": D("0.9")}
 )
 PROTO = Protocol(train_bars=120, test_bars=60, min_trades=5, tune_min_trades=3)
+PROTO_RULES = Protocol()
 SPEC: dict[str, Any] = {
     "id": "sma-cross", "universe": ["X"], "timeframe": "1h", "lookback": 60,
     "indicators": {"fast": {"type": "sma", "period": 3}, "slow": {"type": "sma", "period": 8}, "atr": {"type": "atr", "period": 5}},
@@ -86,6 +91,31 @@ def cfg(venue: Any = FREE) -> BacktestConfig:
 
 DATA = {"X": walk(600)}
 EXAM = DATA["X"][480].ts  # six scored windows (120..480), then a 120-bar final exam
+
+
+def score(
+    label: str, excess: str, trades: int = 8, drawdown: str = "0.1", sat_out: bool = False
+) -> WindowScore:
+    bench = D("0.05")
+    return WindowScore(label, T0, T0, bench + D(excess), bench, trades, D(drawdown), {}, sat_out)
+
+
+def evaluation(
+    window_excess: list[str], exam_excess: str | None, trades: int = 8, drawdown: str = "0.1"
+) -> Evaluation:
+    windows = tuple(score(f"window {i}", e, trades, drawdown) for i, e in enumerate(window_excess, start=1))
+    exam = score("final exam", exam_excess, trades) if exam_excess is not None else None
+    return Evaluation("s", "h", windows, exam)
+
+
+def passing() -> Evaluation:
+    return evaluation(
+        ["0.02", "0.01", "-0.01", "0.03"], "0.04"
+    )  # 3 of 4 windows, exam won, 5 x 8 = 40 trades
+
+
+def check(v: Verdict, name_part: str) -> bool | None:
+    return next(ok for name, ok, _ in v.checks if name_part in name)
 
 
 def test_every_window_is_scored_against_the_benchmark_and_stops_before_the_exam() -> None:
@@ -256,3 +286,54 @@ def test_recording_writes_valid_json_in_a_new_nested_directory_and_leaves_no_tem
     ExamLedger(path).record("s", "h1", D("0.2"), D("0.1"), T0)
     assert json.loads(path.read_text())["s"][0]["hash"] == "h1"
     assert [p.name for p in path.parent.iterdir()] == ["ledger.json"]
+
+
+def test_all_four_conditions_met_is_a_pass() -> None:
+    v = judge(passing(), passing(), PROTO_RULES, "clean")
+    assert v.label == "PASS" and all(ok for _, ok, _ in v.checks)
+
+
+def test_the_windows_rule_is_exact_at_its_boundary() -> None:
+    two_of_four = evaluation(["0.02", "0.01", "-0.01", "-0.03"], "0.04")
+    v = judge(two_of_four, two_of_four, PROTO_RULES, "clean")
+    assert check(v, "windows") is False and v.label == "NOT PROVEN"
+
+
+def test_the_trade_count_rule_is_exact_at_its_boundary() -> None:
+    def with_trades(total: int) -> Evaluation:  # 4 windows + exam = 5 periods
+        per, extra = divmod(total, 5)
+        ev = evaluation(["0.02", "0.01", "0.03", "0.02"], "0.04", trades=per)
+        last = ev.exam
+        assert last is not None
+        bumped = WindowScore(**{**last.__dict__, "trades": last.trades + extra})
+        return Evaluation(ev.strategy_id, ev.strategy_hash, ev.windows, bumped)
+
+    assert check(judge(with_trades(29), with_trades(29), PROTO_RULES, "clean"), "trades") is False
+    assert check(judge(with_trades(30), with_trades(30), PROTO_RULES, "clean"), "trades") is True
+
+
+def test_losing_the_exam_or_the_cost_stress_is_not_proven() -> None:
+    lost_exam = evaluation(["0.02", "0.01", "0.03", "0.02"], "-0.01")
+    assert judge(lost_exam, passing(), PROTO_RULES, "clean").label == "NOT PROVEN"
+    fragile = evaluation(["0.02", "-0.01", "-0.03", "-0.02"], "0.04")
+    v = judge(passing(), fragile, PROTO_RULES, "clean")
+    assert check(v, "x costs") is False and v.label == "NOT PROVEN"
+
+
+def test_an_exam_that_was_not_run_cannot_pass() -> None:
+    no_exam = evaluation(["0.02", "0.01", "0.03", "0.02"], None)
+    v = judge(no_exam, no_exam, PROTO_RULES, "not run")
+    assert v.label == "EXAM NOT RUN" and check(v, "final exam") is None
+
+
+def test_a_strategy_edited_after_its_exam_never_passes() -> None:
+    v = judge(passing(), passing(), PROTO_RULES, "seen by an earlier version")
+    assert v.label == "EXAM ALREADY SEEN"
+
+
+def test_big_drawdowns_and_sat_out_windows_are_flagged_but_do_not_decide() -> None:
+    deep = evaluation(["0.02", "0.01", "0.03", "0.02"], "0.04", drawdown="0.45")
+    v = judge(deep, deep, PROTO_RULES, "clean")
+    assert v.label == "PASS" and any("drawdown 45%" in f for f in v.flags)
+    sat = Evaluation("s", "h", (score("window 1", "0.0", sat_out=True),), None)
+    assert any("held cash" in f for f in judge(sat, sat, PROTO_RULES, "not run").flags)
