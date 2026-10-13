@@ -33,6 +33,7 @@ judged by `llm-report` on forward data and is outside this harness.
 
 Equal dollar amounts of the 25 stocks bought at the first bar's open and held to the end, no rebalancing. It pays
 the same spread and slippage as strategies, once, at purchase. Every strategy starts with the same cash.
+Each strategy is compared with buy-and-hold of **its own** universe (identical to the shared 25 stocks today).
 
 ## What is reported
 
@@ -84,7 +85,11 @@ few bars, a strategy fails to load, or the cached data has gaps the existing dat
 * Training and scoring windows never overlap, and every bar falls in at most one scoring window.
 * The cost-stress run applies exactly double spread and slippage.
 * The exam ledger flags a strategy edited after its exam.
-* A buy-and-hold strategy expressed as a strategy file scores about zero excess return.
+* A never-trading strategy has excess equal to minus the benchmark; a hold strategy is positive but below the
+  benchmark (position caps keep it under 100% invested).
+* No bar at or after a window's scored period (or after the exam start, for rolling windows) can change that
+  window's parameters or score (perturbation tests); the strategy's first possible fill lines up with the
+  benchmark's first open.
 * The four-part rule is unit-tested at its boundaries (one window short of two thirds, 29 vs 30 trades).
 
 ## Known limits
@@ -94,6 +99,10 @@ few bars, a strategy fails to load, or the cached data has gaps the existing dat
   are the check on that.
 * Free IEX data understates volume, so liquidity limits are approximate (existing `volume_scale` setting).
 * Passing the harness is evidence, not proof. Candidates still need a paper run before any real money.
+
+* The engine's older built-in benchmark covers only the first symbol; `compare` does not use it.
+* The cost-stress rerun doubles the benchmark's entry cost as well as the strategy's.
+* A rolling window where no parameter set qualified (only possible with a grid) holds cash and is flagged.
 
 ## Out of scope
 

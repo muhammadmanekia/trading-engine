@@ -88,6 +88,22 @@ Trust a result when out-of-sample efficiency is near 1, the chosen parameters st
 nearby parameter values are also profitable, and there are plenty of trades. Searching more combinations makes
 overfitting *more* likely, which is why the grid is capped.
 
+## 4b. Compare strategies against buy-and-hold
+
+```bash
+python -m engine.backtest compare \
+    --strategy strategies/examples/core-trend-hold.toml --strategy strategies/examples/rsi-dip-wide.toml \
+    --venue alpaca-stocks --data alpaca --config config/research.toml --out runs/compare
+# only when you are ready to spend each strategy's one final exam:
+python -m engine.backtest compare ... --final-exam
+```
+Each strategy is scored on rolling 6-month windows (parameters chosen on the preceding 2 years), then once on a
+final exam (default: 2024-07-01 to now). It must beat an equal-weight buy-and-hold of its own stocks on the exam,
+win at least two thirds of the windows, make 30+ trades, and still win with costs doubled. Editing a strategy
+after its exam marks the new version `EXAM ALREADY SEEN` for good (see `runs/exam-ledger.json`). Use
+`config/research.toml` so the live circuit breakers do not end a long backtest early. A PASS earns a paper run,
+not real money. Note the cost-stress rerun doubles the benchmark's entry cost too, not only the strategy's.
+
 ## 5. Run it for real
 Put it in the account config and restart the service:
 ```toml
