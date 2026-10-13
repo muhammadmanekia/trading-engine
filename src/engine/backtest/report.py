@@ -27,7 +27,7 @@ def format_summary(r: BacktestResult, m: Metrics) -> str:
         f"  spread {c.venue.spread_bps} bps (round trip costs ~{c.venue.round_trip_cost * 100:.2f}% of notional)",
         f"  strategies: {', '.join(f'{k}@{v}' for k, v in r.strategy_hashes.items()) or 'n/a'}",
         "",
-        f"  Return        {_pct(m.total_return):>10}   (buy & hold: {_pct(m.benchmark_return)}, excess {_pct(m.excess_return)})",
+        f"  Return        {_pct(m.total_return):>10}   (buy & hold of the first symbol only: {_pct(m.benchmark_return)}, excess {_pct(m.excess_return)})",
         f"  Equity        {_num(m.start_equity)} -> {_num(m.final_equity)}",
         f"  CAGR          {_pct(m.cagr):>10}",
         f"  Max drawdown  {_pct(m.max_drawdown):>10}   (longest underwater: {m.max_drawdown_bars} bars)",

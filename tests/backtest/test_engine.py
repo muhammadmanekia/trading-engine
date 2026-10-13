@@ -230,3 +230,9 @@ def test_reports_are_written_and_exact(tmp_path) -> None:  # type: ignore[no-unt
     data = to_dict(r, m)
     assert data["metrics"]["trades"] == 1 and data["trades"][0]["exit_reason"] == "rule"
     assert Decimal(data["metrics"]["final_equity"]) == r.final_equity  # exact decimals survive the round trip
+
+
+def test_the_summary_says_the_built_in_benchmark_covers_only_the_first_symbol() -> None:
+    r = run(HOLD, closes(100, 101, 103, 102, 105, 108))
+    text = format_summary(r, compute_metrics(r))
+    assert "first symbol only" in text
