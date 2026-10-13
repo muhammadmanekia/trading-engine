@@ -11,6 +11,7 @@ Protocol (see docs/superpowers/specs/2026-10-13-strategy-evaluation-design.md):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -192,10 +193,17 @@ def evaluate(
 ExamStatus = Literal["not run", "new", "clean", "seen by an earlier version"]
 
 
+def exam_fingerprint(**parts: Any) -> str:
+    """A digest of every setting that shapes an exam result (grid, objective, protocol, dates, risk, costs, cash),
+    so rerunning the same file under different settings cannot pass for a first, clean exam."""
+    return hashlib.sha256(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()
+
+
 class ExamLedger:
-    """Which strategy versions have had their final exam. One entry per strategy hash; the first version of a
-    strategy id to be examined is 'clean', every later edited version is permanently 'seen by an earlier
-    version', because its author had already looked at the exam result."""
+    """Which strategy versions have had their final exam, and under which settings. An entry matches only the same
+    strategy hash AND the same settings fingerprint. The first exam of a strategy id is 'clean'; every later one
+    (an edited file, or the same file under different settings) is permanently 'seen by an earlier version',
+    because its author had already looked at an exam result."""
 
     def __init__(self, path: Path) -> None:
         self._path = path
@@ -209,22 +217,38 @@ class ExamLedger:
             except ValueError as exc:
                 raise ValueError(f"exam ledger {path} is unreadable ({exc}); fix or delete it") from exc
 
-    def status(self, strategy_id: str, strategy_hash: str) -> ExamStatus:
-        entries = self._data.get(strategy_id, [])
-        for e in entries:
-            if e["hash"] == strategy_hash:
-                return "clean" if e["clean"] else "seen by an earlier version"
-        return "new" if not entries else "seen by an earlier version"
+    def _match(self, strategy_id: str, strategy_hash: str, fingerprint: str) -> dict[str, Any] | None:
+        return next(
+            (
+                e
+                for e in self._data.get(strategy_id, [])
+                if e["hash"] == strategy_hash and e["fingerprint"] == fingerprint
+            ),
+            None,
+        )
+
+    def status(self, strategy_id: str, strategy_hash: str, fingerprint: str) -> ExamStatus:
+        entry = self._match(strategy_id, strategy_hash, fingerprint)
+        if entry is not None:
+            return "clean" if entry["clean"] else "seen by an earlier version"
+        return "seen by an earlier version" if self._data.get(strategy_id) else "new"
 
     def record(
-        self, strategy_id: str, strategy_hash: str, exam_return: Decimal, benchmark: Decimal, now: datetime
+        self,
+        strategy_id: str,
+        strategy_hash: str,
+        fingerprint: str,
+        exam_return: Decimal,
+        benchmark: Decimal,
+        now: datetime,
     ) -> None:
-        entries = self._data.setdefault(strategy_id, [])
-        if any(e["hash"] == strategy_hash for e in entries):
+        if self._match(strategy_id, strategy_hash, fingerprint) is not None:
             return
+        entries = self._data.setdefault(strategy_id, [])
         entries.append(
             {
                 "hash": strategy_hash,
+                "fingerprint": fingerprint,
                 "clean": not entries,
                 "recorded": now.isoformat(),
                 "exam_return": str(exam_return),

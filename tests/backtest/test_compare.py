@@ -17,6 +17,7 @@ from engine.backtest.compare import (
     WindowScore,
     WindowSpan,
     evaluate,
+    exam_fingerprint,
     format_scoreboard,
     judge,
     required_wins,
@@ -255,27 +256,46 @@ def test_score_span_lets_the_strategy_decide_at_the_close_before_the_window_open
 
 def test_first_exam_is_clean_and_rerunning_the_same_strategy_stays_clean(tmp_path: Any) -> None:
     ledger = ExamLedger(tmp_path / "ledger.json")
-    assert ledger.status("s", "h1") == "new"
-    ledger.record("s", "h1", D("0.2"), D("0.1"), T0)
-    assert ledger.status("s", "h1") == "clean"
-    ledger.record("s", "h1", D("0.2"), D("0.1"), T0)  # same hash again changes nothing
+    assert ledger.status("s", "h1", "f1") == "new"
+    ledger.record("s", "h1", "f1", D("0.2"), D("0.1"), T0)
+    assert ledger.status("s", "h1", "f1") == "clean"
+    ledger.record("s", "h1", "f1", D("0.2"), D("0.1"), T0)  # same hash and settings again changes nothing
     assert len(ExamLedger(tmp_path / "ledger.json")._data["s"]) == 1
 
 
 def test_editing_a_strategy_after_its_exam_makes_the_new_version_not_clean(tmp_path: Any) -> None:
     ledger = ExamLedger(tmp_path / "ledger.json")
-    ledger.record("s", "h1", D("0.2"), D("0.1"), T0)
-    assert ledger.status("s", "h2") == "seen by an earlier version"
-    ledger.record("s", "h2", D("0.5"), D("0.1"), T0)
-    assert ledger.status("s", "h2") == "seen by an earlier version"  # recording does not launder it
-    assert ledger.status("s", "h1") == "clean"
-    assert ledger.status("other", "h9") == "new"
+    ledger.record("s", "h1", "f1", D("0.2"), D("0.1"), T0)
+    assert ledger.status("s", "h2", "f1") == "seen by an earlier version"
+    ledger.record("s", "h2", "f1", D("0.5"), D("0.1"), T0)
+    assert ledger.status("s", "h2", "f1") == "seen by an earlier version"  # recording does not launder it
+    assert ledger.status("s", "h1", "f1") == "clean"
+    assert ledger.status("other", "h9", "f1") == "new"
+
+
+def test_rerunning_the_same_strategy_under_different_settings_is_not_clean(tmp_path: Any) -> None:
+    ledger = ExamLedger(tmp_path / "ledger.json")
+    ledger.record("s", "h1", "f1", D("0.2"), D("0.1"), T0)
+    assert ledger.status("s", "h1", "f2") == "seen by an earlier version"
+    ledger.record("s", "h1", "f2", D("0.6"), D("0.1"), T0)
+    reloaded = ExamLedger(tmp_path / "ledger.json")
+    assert reloaded.status("s", "h1", "f2") == "seen by an earlier version"  # recording does not launder it
+    assert reloaded.status("s", "h1", "f1") == "clean"
+    assert [e["fingerprint"] for e in reloaded._data["s"]] == ["f1", "f2"]
+
+
+def test_the_exam_fingerprint_is_stable_and_changes_with_any_setting() -> None:
+    a = exam_fingerprint(grid={"x": [1, 2]}, objective="sharpe", cash="100000", end=None)
+    assert a == exam_fingerprint(end=None, cash="100000", objective="sharpe", grid={"x": [1, 2]})
+    assert len(a) == 64 and all(c in "0123456789abcdef" for c in a)
+    assert a != exam_fingerprint(grid={"x": [1, 3]}, objective="sharpe", cash="100000", end=None)
+    assert a != exam_fingerprint(grid={"x": [1, 2]}, objective="sharpe", cash="100000", end="2026-01-01")
 
 
 def test_the_ledger_survives_a_restart_and_rejects_a_corrupt_file(tmp_path: Any) -> None:
     path = tmp_path / "sub" / "ledger.json"
-    ExamLedger(path).record("s", "h1", D("0.2"), D("0.1"), T0)
-    assert ExamLedger(path).status("s", "h1") == "clean"
+    ExamLedger(path).record("s", "h1", "f1", D("0.2"), D("0.1"), T0)
+    assert ExamLedger(path).status("s", "h1", "f1") == "clean"
     path.write_text("{not json")
     with pytest.raises(ValueError, match="exam ledger"):
         ExamLedger(path)
@@ -285,7 +305,7 @@ def test_recording_writes_valid_json_in_a_new_nested_directory_and_leaves_no_tem
     tmp_path: Any,
 ) -> None:
     path = tmp_path / "a" / "b" / "ledger.json"
-    ExamLedger(path).record("s", "h1", D("0.2"), D("0.1"), T0)
+    ExamLedger(path).record("s", "h1", "f1", D("0.2"), D("0.1"), T0)
     assert json.loads(path.read_text())["s"][0]["hash"] == "h1"
     assert [p.name for p in path.parent.iterdir()] == ["ledger.json"]
 

@@ -165,6 +165,9 @@ def test_compare_prints_a_scoreboard_and_locks_the_exam_until_asked(
     assert "final exam" in out and "EXAM NOT RUN" not in out and ledger.exists()
     assert {p.name for p in (workdir / "cmp").iterdir()} == {"scoreboard.txt", "scoreboard.json"}
 
+    assert main([*common, "--final-exam"], {}) == 0  # the same file under the same settings stays clean
+    assert "EXAM ALREADY SEEN" not in capsys.readouterr().out
+
     (workdir / "wave.toml").write_text(
         (workdir / "wave.toml").read_text().replace("quantity = 5", "quantity = 6")
     )
@@ -181,3 +184,23 @@ def test_compare_refuses_an_exam_start_with_too_little_history_before_it(
         == 2
     )
     assert "not enough history before the exam" in capsys.readouterr().err
+
+
+def test_rerunning_the_exam_under_different_settings_is_marked_as_seen(
+    workdir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exam = (T0 + timedelta(hours=150)).strftime("%Y-%m-%dT%H:%M:%S")
+    later = (T0 + timedelta(hours=160)).strftime("%Y-%m-%dT%H:%M:%S")
+    ledger = workdir / "ledger.json"
+
+    def run(*extra: str) -> str:
+        cmd = args(workdir, "compare", "--train-bars", "60", "--test-bars", "30", "--ledger", str(ledger),
+                   "--final-exam", *extra)  # fmt: skip
+        assert main(cmd, {}) == 0
+        return capsys.readouterr().out
+
+    assert "EXAM ALREADY SEEN" not in run("--exam-start", exam)
+    assert "EXAM ALREADY SEEN" not in run("--exam-start", exam)
+    assert "EXAM ALREADY SEEN" in run("--exam-start", exam, "--grid", "indicators.fast.period=2,3")
+    assert "EXAM ALREADY SEEN" in run("--exam-start", later)
+    assert "EXAM ALREADY SEEN" in run("--exam-start", exam, "--cash", "50000")

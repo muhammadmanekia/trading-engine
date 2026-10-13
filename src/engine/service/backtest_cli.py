@@ -7,6 +7,7 @@ the backtest package never does.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import sys
@@ -23,6 +24,7 @@ from engine.backtest.compare import (
     ExamStatus,
     Protocol,
     evaluate,
+    exam_fingerprint,
     format_scoreboard,
     judge,
     scoreboard_json,
@@ -239,6 +241,17 @@ def _compare(
     ledger = ExamLedger(Path(args.ledger))
     grid = _parse_grid(args.grid)
     parameter_grid(grid)  # fail fast on a too-large search
+    fingerprint = exam_fingerprint(
+        grid=grid,
+        objective=args.objective,
+        protocol=dataclasses.asdict(protocol),
+        exam_start=exam_start.isoformat(),
+        risk=config.risk.model_dump(mode="json"),
+        venue=dataclasses.asdict(config.venue),
+        starting_cash=str(config.starting_cash),
+        volume_scale=str(config.volume_scale),
+        end=args.end,
+    )
     now = datetime.now(UTC)
     rows = []
     for strategy in strategies:
@@ -250,10 +263,17 @@ def _compare(
             strategy, data, stressed(config, protocol.cost_multiplier), protocol, exam_start,
             run_exam=args.final_exam, grid=grid, objective=args.objective,
         )  # fmt: skip
-        status: ExamStatus = ledger.status(strategy.id, strategy.hash) if args.final_exam else "not run"
+        status: ExamStatus = (
+            ledger.status(strategy.id, strategy.hash, fingerprint) if args.final_exam else "not run"
+        )
         if args.final_exam and base.exam is not None:
             ledger.record(
-                strategy.id, strategy.hash, base.exam.strategy_return, base.exam.benchmark_return, now
+                strategy.id,
+                strategy.hash,
+                fingerprint,
+                base.exam.strategy_return,
+                base.exam.benchmark_return,
+                now,
             )
         rows.append((base, judge(base, stress, protocol, status)))
     text = format_scoreboard(rows, risk_note=risk_note)
