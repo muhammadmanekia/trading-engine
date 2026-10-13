@@ -33,6 +33,7 @@ from engine.projections.account import AccountProjector
 from engine.risk.config import disposable_money_preset, replace
 from engine.service.alerts import AlertSink, DiscordWebhookSink, LogAlertSink, MultiAlertSink
 from engine.service.config import Secrets, ServiceConfig, load_config
+from engine.service.dotenv import load_env_file
 from engine.service.executor import Executor, Intervals
 from engine.service.health import HealthServer
 from engine.service.inbox import PostgresInbox, submit_to_inbox
@@ -46,7 +47,9 @@ log = logging.getLogger("engine.cli")
 
 
 def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None) -> int:
-    env = os.environ if env is None else env
+    if env is None:
+        load_env_file()  # secrets from .env, so they need setting only once
+        env = os.environ
     args = _parser().parse_args(argv)
     try:
         secrets = Secrets.from_env(env)
