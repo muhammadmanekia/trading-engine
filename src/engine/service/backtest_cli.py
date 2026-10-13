@@ -75,7 +75,10 @@ def _parser() -> argparse.ArgumentParser:
             )
         sp.add_argument("--venue", required=True, choices=["alpaca-stocks", "robinhood-crypto"])
         sp.add_argument("--data", required=True, help="csv:<directory> or alpaca")
-        sp.add_argument("--start", help="YYYY-MM-DD (default: all available for csv, 1 year ago for alpaca)")
+        sp.add_argument(
+            "--start",
+            help="YYYY-MM-DD (default: all available for csv; for alpaca 1 year ago, or 2020-01-01 for compare)",
+        )
         sp.add_argument("--end", help="YYYY-MM-DD (default: now)")
         sp.add_argument("--cash", default="100000")
         sp.add_argument(
@@ -178,10 +181,10 @@ def _dispatch(args: argparse.Namespace, env: Mapping[str, str]) -> int:
     if len(timeframes) != 1:
         raise ValueError(f"strategies in one run must share a timeframe, got {sorted(timeframes)}")
     timeframe = timeframes.pop()
-    if args.command == "compare" and args.start is None:
-        args.start = "2020-01-01"  # the rolling windows need years of history, not the 1-year default
+    # compare's rolling windows need years of history, not the 1-year alpaca default (csv keeps all available)
+    alpaca_start = datetime(2020, 1, 1, tzinfo=UTC) if args.command == "compare" else None
     symbols = sorted({sym for s in strategies for sym in s.universe})
-    data = _load(args, env, symbols, timeframe)
+    data = _load(args, env, symbols, timeframe, alpaca_start=alpaca_start)
 
     if args.command == "compare":
         return _compare(args, strategies, data, config, risk_note=args.config or "built-in preset")
@@ -345,12 +348,20 @@ def _parse_date(text: str | None, default: datetime) -> datetime:
 
 
 def _load(
-    args: argparse.Namespace, env: Mapping[str, str], symbols: Sequence[str], timeframe: str
+    args: argparse.Namespace,
+    env: Mapping[str, str],
+    symbols: Sequence[str],
+    timeframe: str,
+    *,
+    alpaca_start: datetime | None = None,
 ) -> dict[str, list[Bar]]:
+    """`alpaca_start` replaces the 1-year default start for --data alpaca; csv defaults to all available."""
     now = datetime.now(UTC)
-    start = _parse_date(
-        args.start, now - timedelta(days=365) if args.data == "alpaca" else datetime(1970, 1, 1, tzinfo=UTC)
-    )
+    if args.data == "alpaca":
+        default_start = alpaca_start or now - timedelta(days=365)
+    else:
+        default_start = datetime(1970, 1, 1, tzinfo=UTC)
+    start = _parse_date(args.start, default_start)
     end = _parse_date(args.end, now + timedelta(days=1))
     source: HistoricalData
     if args.data.startswith("csv:"):

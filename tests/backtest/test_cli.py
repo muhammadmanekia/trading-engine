@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import math
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -241,3 +242,39 @@ def test_the_default_ledger_lives_in_the_project_not_the_current_directory(
     assert f"note: creating a new exam ledger at {ledger}" in capsys.readouterr().err
     assert main(cmd, {}) == 0
     assert "creating a new exam ledger" not in capsys.readouterr().err  # only when it did not exist
+
+
+def test_compare_on_csv_data_uses_all_available_history_by_default(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    early = datetime(2019, 6, 3, tzinfo=UTC)  # before the 2020 default that only applies to --data alpaca
+    closes = [100 + round(12 * math.sin(i / 7)) for i in range(220)]
+    to_csv(bars_from_closes(closes, start=early, spread="1", volume="500000000"), tmp_path / "BTC-USD_1h.csv")
+    (tmp_path / "wave.toml").write_text(STRATEGY)
+    exam = (early + timedelta(hours=150)).strftime("%Y-%m-%dT%H:%M:%S")
+    cmd = args(tmp_path, "compare", "--train-bars", "60", "--test-bars", "30", "--exam-start", exam)
+    assert main(cmd, {}) == 0, capsys.readouterr().err
+
+
+def test_compare_on_alpaca_data_starts_in_2020_by_default_and_run_keeps_one_year(
+    workdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    starts: list[datetime] = []
+
+    class FakeSource:
+        def __init__(self, *_: Any) -> None:
+            pass
+
+        def bars(self, symbol: str, timeframe: str, start: datetime, end: datetime) -> list[Any]:
+            starts.append(start)
+            return []  # stop right after loading: "no bars returned"
+
+    monkeypatch.setattr(backtest_cli, "AlpacaBars", FakeSource)
+    monkeypatch.setattr(backtest_cli, "BarCache", FakeSource)
+    env = {"ALPACA_PAPER_KEY_ID": "k", "ALPACA_PAPER_SECRET": "s"}
+    alpaca = [a if a != f"csv:{workdir}" else "alpaca" for a in args(workdir, "compare")]
+    assert main(alpaca, env) == 2
+    assert starts == [datetime(2020, 1, 1, tzinfo=UTC)]
+    assert main([a if a != "compare" else "run" for a in alpaca], env) == 2
+    assert datetime.now(UTC) - starts[1] > timedelta(days=364)
+    assert datetime.now(UTC) - starts[1] < timedelta(days=366)
