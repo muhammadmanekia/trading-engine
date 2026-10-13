@@ -17,9 +17,11 @@ from engine.backtest.compare import (
     WindowScore,
     WindowSpan,
     evaluate,
+    format_scoreboard,
     judge,
     required_wins,
     rolling_spans,
+    scoreboard_json,
     stressed,
 )
 from engine.backtest.engine import BacktestConfig
@@ -338,3 +340,24 @@ def test_big_drawdowns_and_sat_out_windows_are_flagged_but_do_not_decide() -> No
     assert v.label == "PASS" and any("drawdown 45%" in f for f in v.flags)
     sat = Evaluation("s", "h", (score("window 1", "0.0", sat_out=True),), None)
     assert any("held cash" in f for f in judge(sat, sat, PROTO_RULES, "not run").flags)
+
+
+def test_the_scoreboard_names_the_verdict_every_check_and_every_window() -> None:
+    ev = passing()
+    v = judge(ev, ev, PROTO_RULES, "clean")
+    text = format_scoreboard([(ev, v)], risk_note="config/research.toml")
+    assert "s@h" in text and "PASS" in text and "config/research.toml" in text
+    assert "[x] wins at least 3 of 4 rolling windows" in text and "window 4" in text and "final exam" in text
+    assert "Cost-stress doubles the benchmark's entry cost as well as the strategy's costs." in text
+    bad = judge(evaluation(["-0.02"] * 4, "-0.01"), ev, PROTO_RULES, "clean")
+    bad_text = format_scoreboard([(ev, bad)], risk_note="x")
+    assert "[ ] " in bad_text and "NOT PROVEN" in bad_text
+
+
+def test_the_json_scoreboard_keeps_exact_decimals_as_strings() -> None:
+    ev = passing()
+    out = scoreboard_json([(ev, judge(ev, ev, PROTO_RULES, "clean"))])
+    parsed = json.loads(json.dumps(out))
+    assert parsed[0]["strategy"] == "s" and parsed[0]["verdict"] == "PASS"
+    assert ev.exam is not None
+    assert parsed[0]["exam"]["excess"] == str(ev.exam.excess)

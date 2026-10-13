@@ -294,3 +294,58 @@ def judge(base: Evaluation, stress: Evaluation, p: Protocol, exam_status: ExamSt
     else:
         label = "PASS" if all(ok for _, ok, _ in checks) else "NOT PROVEN"
     return Verdict(label, checks, tuple(flags))
+
+
+def _pct(x: Decimal) -> str:
+    return f"{x:+.1%}"
+
+
+def _line(w: WindowScore) -> str:
+    return (
+        f"    {w.label:<10} {w.start:%Y-%m-%d}..{w.end:%Y-%m-%d}  strategy {_pct(w.strategy_return):>8}  "
+        f"buy&hold {_pct(w.benchmark_return):>8}  excess {_pct(w.excess):>8}  trades {w.trades:>3}  "
+        f"drawdown {w.max_drawdown:.0%}" + ("  (held cash)" if w.sat_out else "")
+    )
+
+
+def format_scoreboard(rows: Sequence[tuple[Evaluation, Verdict]], *, risk_note: str) -> str:
+    out = [
+        f"Strategy comparison vs equal-weight buy-and-hold of each strategy's own stocks  (risk config: {risk_note})"
+    ]
+    for ev, v in rows:
+        out += ["", f"{ev.strategy_id}@{ev.strategy_hash}  ->  {v.label}"]
+        out += [_line(w) for w in ev.windows]
+        if ev.exam is not None:
+            out.append(_line(ev.exam))
+        for name, ok, detail in v.checks:
+            mark = "?" if ok is None else ("x" if ok else " ")
+            out.append(f"  [{mark}] {name}: {detail}")
+        out += [f"  note: {f}" for f in v.flags]
+    out += [
+        "",
+        "Cost-stress doubles the benchmark's entry cost as well as the strategy's costs.",
+        "A PASS is evidence, not proof: it earns a paper run, nothing more.",
+    ]
+    return "\n".join(out)
+
+
+def _score_json(w: WindowScore) -> dict[str, Any]:
+    return {
+        "label": w.label, "start": w.start.isoformat(), "end": w.end.isoformat(),
+        "strategy_return": str(w.strategy_return), "benchmark_return": str(w.benchmark_return),
+        "excess": str(w.excess), "trades": w.trades, "max_drawdown": str(w.max_drawdown),
+        "params": dict(w.params), "sat_out": w.sat_out,
+    }  # fmt: skip
+
+
+def scoreboard_json(rows: Sequence[tuple[Evaluation, Verdict]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "strategy": ev.strategy_id, "hash": ev.strategy_hash, "verdict": v.label,
+            "windows": [_score_json(w) for w in ev.windows],
+            "exam": _score_json(ev.exam) if ev.exam else None,
+            "checks": [{"condition": n, "met": ok, "detail": d} for n, ok, d in v.checks],
+            "flags": list(v.flags),
+        }
+        for ev, v in rows
+    ]  # fmt: skip
