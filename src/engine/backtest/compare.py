@@ -11,6 +11,7 @@ Protocol (see docs/superpowers/specs/2026-10-13-strategy-evaluation-design.md):
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -208,14 +209,16 @@ class ExamLedger:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._data: dict[str, list[dict[str, Any]]] = {}
+        if path.is_dir():
+            raise ValueError(f"exam ledger {path} is a directory; pass a file path with --ledger")
         if path.exists():
             try:
-                loaded = json.loads(path.read_text())
-                if not isinstance(loaded, dict):
-                    raise ValueError("not an object")
-                self._data = loaded
-            except ValueError as exc:
-                raise ValueError(f"exam ledger {path} is unreadable ({exc}); fix or delete it") from exc
+                self._data = _valid_ledger(json.loads(path.read_text()))
+            except (OSError, ValueError) as exc:
+                raise ValueError(
+                    f"exam ledger {path} is unreadable ({exc}). Repair it by hand if you can: deleting it "
+                    "resets every strategy's exam, so every exam result after that must be treated as seen."
+                ) from exc
 
     def _match(self, strategy_id: str, strategy_hash: str, fingerprint: str) -> dict[str, Any] | None:
         return next(
@@ -255,11 +258,35 @@ class ExamLedger:
                 "benchmark_return": str(benchmark),
             }
         )
+        # Not locked: two runs recording at the same time can overwrite each other's entries.
         self._path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=self._path.parent, suffix=".tmp")
-        with os.fdopen(fd, "w") as fh:
-            json.dump(self._data, fh, indent=2)
-        os.replace(tmp, self._path)  # atomic: a crash never leaves a half-written ledger
+        try:
+            with os.fdopen(fd, "w") as fh:
+                json.dump(self._data, fh, indent=2)
+            os.replace(tmp, self._path)  # atomic: a crash never leaves a half-written ledger
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(tmp)
+            raise
+
+
+def _valid_ledger(loaded: Any) -> dict[str, list[dict[str, Any]]]:
+    """The ledger's shape: {strategy id: [{"hash": str, "clean": bool, "fingerprint": str, ...}, ...]}."""
+    if not isinstance(loaded, dict):
+        raise ValueError("not an object")
+    for sid, entries in loaded.items():
+        if not isinstance(entries, list):
+            raise ValueError(f"{sid!r} is not a list of entries")
+        for e in entries:
+            if not (
+                isinstance(e, dict)
+                and isinstance(e.get("hash"), str)
+                and isinstance(e.get("clean"), bool)
+                and isinstance(e.get("fingerprint"), str)
+            ):
+                raise ValueError(f"{sid!r} has an entry without a str hash, bool clean and str fingerprint")
+    return loaded
 
 
 @dataclass(frozen=True)

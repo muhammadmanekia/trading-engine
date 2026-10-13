@@ -48,6 +48,8 @@ from engine.strategy.schema import StrategyDef, StrategyError, load_strategy
 from engine.strategy.source import RuleStrategySource
 
 ACCOUNT = "bt"
+PROJECT_ROOT = Path(__file__).resolve().parents[3]  # the trading-engine folder
+DEFAULT_LEDGER = Path("runs/exam-ledger.json")  # under PROJECT_ROOT, wherever the command is run from
 
 
 def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None) -> int:
@@ -120,7 +122,7 @@ def _parser() -> argparse.ArgumentParser:
     cmp_.add_argument(
         "--final-exam", action="store_true", help="also run the final exam (recorded in the ledger)"
     )
-    cmp_.add_argument("--ledger", default="runs/exam-ledger.json")
+    cmp_.add_argument("--ledger", help="exam ledger file (default: runs/exam-ledger.json in the project)")
     cmp_.add_argument(
         "--grid",
         action="append",
@@ -238,7 +240,8 @@ def _compare(
 ) -> int:
     protocol = Protocol(train_bars=args.train_bars, test_bars=args.test_bars)
     exam_start = _parse_date(args.exam_start, datetime.now(UTC))
-    ledger = ExamLedger(Path(args.ledger))
+    ledger_path = Path(args.ledger) if args.ledger else PROJECT_ROOT / DEFAULT_LEDGER
+    ledger = ExamLedger(ledger_path)
     grid = _parse_grid(args.grid)
     parameter_grid(grid)  # fail fast on a too-large search
     fingerprint = exam_fingerprint(
@@ -252,9 +255,13 @@ def _compare(
         volume_scale=str(config.volume_scale),
         end=args.end,
     )
-    now = datetime.now(UTC)
+    # Read every status before anything is recorded, evaluate everything before recording any exam: a failure
+    # partway through then uses up no strategy's exam.
+    statuses: list[ExamStatus] = [
+        ledger.status(s.id, s.hash, fingerprint) if args.final_exam else "not run" for s in strategies
+    ]
     rows = []
-    for strategy in strategies:
+    for strategy, status in zip(strategies, statuses, strict=True):
         base = evaluate(
             strategy, data, config, protocol, exam_start,
             run_exam=args.final_exam, grid=grid, objective=args.objective,
@@ -263,19 +270,25 @@ def _compare(
             strategy, data, stressed(config, protocol.cost_multiplier), protocol, exam_start,
             run_exam=args.final_exam, grid=grid, objective=args.objective,
         )  # fmt: skip
-        status: ExamStatus = (
-            ledger.status(strategy.id, strategy.hash, fingerprint) if args.final_exam else "not run"
-        )
-        if args.final_exam and base.exam is not None:
-            ledger.record(
-                strategy.id,
-                strategy.hash,
-                fingerprint,
-                base.exam.strategy_return,
-                base.exam.benchmark_return,
-                now,
-            )
         rows.append((base, judge(base, stress, protocol, status)))
+    if args.final_exam:
+        if not ledger_path.exists():
+            print(
+                f"note: creating a new exam ledger at {ledger_path}; if an older one was deleted, "
+                "earlier exam results count as seen.",
+                file=sys.stderr,
+            )
+        now = datetime.now(UTC)
+        for strategy, (base, _) in zip(strategies, rows, strict=True):
+            if base.exam is not None:
+                ledger.record(
+                    strategy.id,
+                    strategy.hash,
+                    fingerprint,
+                    base.exam.strategy_return,
+                    base.exam.benchmark_return,
+                    now,
+                )
     text = format_scoreboard(rows, risk_note=risk_note)
     print(text)
     if args.out:

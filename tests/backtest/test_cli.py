@@ -11,6 +11,7 @@ import pytest
 from engine.broker.base import ProtectionMode
 from engine.domain.types import AssetClass
 from engine.marketdata.history import to_csv
+from engine.service import backtest_cli
 from engine.service.backtest_cli import main
 from engine.strategy.schema import StrategyError, load_strategy, validate_for_venue
 from tests.helpers import T0, bars_from_closes
@@ -204,3 +205,39 @@ def test_rerunning_the_exam_under_different_settings_is_marked_as_seen(
     assert "EXAM ALREADY SEEN" in run("--exam-start", exam, "--grid", "indicators.fast.period=2,3")
     assert "EXAM ALREADY SEEN" in run("--exam-start", later)
     assert "EXAM ALREADY SEEN" in run("--exam-start", exam, "--cash", "50000")
+
+
+def test_a_failure_partway_through_compare_records_no_exam(
+    workdir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    closes = [100 + round(12 * math.sin(i / 5)) for i in range(100)]  # ETH-USD stops after 100 bars
+    to_csv(bars_from_closes(closes, spread="1", volume="500000000"), workdir / "ETH-USD_1h.csv")
+    (workdir / "pair.toml").write_text(
+        STRATEGY.replace('id = "wave"', 'id = "pair"').replace('["BTC-USD"]', '["BTC-USD", "ETH-USD"]')
+    )
+    exam = (T0 + timedelta(hours=150)).strftime("%Y-%m-%dT%H:%M:%S")
+    ledger = workdir / "ledger.json"
+    cmd = args(workdir, "compare", "--strategy", str(workdir / "pair.toml"), "--train-bars", "60",
+               "--test-bars", "30", "--exam-start", exam, "--ledger", str(ledger), "--final-exam")  # fmt: skip
+    assert main(cmd, {}) == 2
+    assert "no bars for ETH-USD" in capsys.readouterr().err
+    assert not ledger.exists()  # "wave" was fine, but its exam is not used up by a run that failed
+
+
+def test_the_default_ledger_lives_in_the_project_not_the_current_directory(
+    workdir: Path, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:  # fmt: skip
+    assert backtest_cli.PROJECT_ROOT == ROOT  # the trading-engine folder
+    project, elsewhere = tmp_path_factory.mktemp("project"), tmp_path_factory.mktemp("elsewhere")
+    monkeypatch.setattr(backtest_cli, "PROJECT_ROOT", project)
+    monkeypatch.chdir(elsewhere)
+    exam = (T0 + timedelta(hours=150)).strftime("%Y-%m-%dT%H:%M:%S")
+    cmd = args(workdir, "compare", "--train-bars", "60", "--test-bars", "30", "--exam-start", exam,
+               "--final-exam")  # fmt: skip
+    assert main(cmd, {}) == 0
+    ledger = project / "runs" / "exam-ledger.json"
+    assert ledger.exists() and not (elsewhere / "runs").exists()
+    assert f"note: creating a new exam ledger at {ledger}" in capsys.readouterr().err
+    assert main(cmd, {}) == 0
+    assert "creating a new exam ledger" not in capsys.readouterr().err  # only when it did not exist

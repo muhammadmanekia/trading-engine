@@ -297,8 +297,49 @@ def test_the_ledger_survives_a_restart_and_rejects_a_corrupt_file(tmp_path: Any)
     ExamLedger(path).record("s", "h1", "f1", D("0.2"), D("0.1"), T0)
     assert ExamLedger(path).status("s", "h1", "f1") == "clean"
     path.write_text("{not json")
+    with pytest.raises(ValueError, match="exam ledger") as err:
+        ExamLedger(path)
+    message = str(err.value)
+    assert "fix or delete" not in message  # deleting it would launder every exam, so never invite it
+    assert "resets every strategy's exam" in message and "treated as seen" in message
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "[]",
+        '{"s": {}}',
+        '{"s": [1]}',
+        '{"s": [{"hash": "h", "clean": true}]}',
+        '{"s": [{"hash": 1, "clean": true, "fingerprint": "f"}]}',
+        '{"s": [{"hash": "h", "clean": "yes", "fingerprint": "f"}]}',
+        '{"s": [{"hash": "h", "clean": true, "fingerprint": null}]}',
+    ],
+)
+def test_a_malformed_ledger_is_a_clear_error_not_a_crash(tmp_path: Any, content: str) -> None:
+    path = tmp_path / "ledger.json"
+    path.write_text(content)
     with pytest.raises(ValueError, match="exam ledger"):
         ExamLedger(path)
+
+
+def test_a_ledger_path_that_is_a_directory_is_a_clear_error(tmp_path: Any) -> None:
+    with pytest.raises(ValueError, match="exam ledger"):
+        ExamLedger(tmp_path)
+
+
+def test_a_failed_ledger_write_leaves_no_temp_file_and_reraises(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import engine.backtest.compare as compare
+
+    def broken(*_: Any, **__: Any) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(compare.json, "dump", broken)
+    with pytest.raises(OSError, match="disk full"):
+        ExamLedger(tmp_path / "ledger.json").record("s", "h1", "f1", D("0.2"), D("0.1"), T0)
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_recording_writes_valid_json_in_a_new_nested_directory_and_leaves_no_temp_files(
