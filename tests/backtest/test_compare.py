@@ -2,19 +2,28 @@
 
 from __future__ import annotations
 
+import json
 import random
 from datetime import timedelta
 from typing import Any
 
 import pytest
 
-from engine.backtest.compare import Protocol, WindowSpan, evaluate, required_wins, rolling_spans, stressed
+from engine.backtest.compare import (
+    ExamLedger,
+    Protocol,
+    WindowSpan,
+    evaluate,
+    required_wins,
+    rolling_spans,
+    stressed,
+)
 from engine.backtest.engine import BacktestConfig
 from engine.backtest.venue import ALPACA_STOCKS
 from engine.backtest.walkforward import backtest
 from engine.risk.config import disposable_money_preset
 from engine.strategy.schema import parse_strategy
-from tests.helpers import D, bars_from_closes
+from tests.helpers import T0, D, bars_from_closes
 
 
 def test_four_windows_fit_between_mid_2020_and_the_exam() -> None:
@@ -210,3 +219,40 @@ def test_score_span_lets_the_strategy_decide_at_the_close_before_the_window_open
     times = [b.ts for b in DATA["X"]]
     expected = [times[times.index(w.start) - 1] for w in (*ev.windows, ev.exam) if w is not None]
     assert seen == expected
+
+
+def test_first_exam_is_clean_and_rerunning_the_same_strategy_stays_clean(tmp_path: Any) -> None:
+    ledger = ExamLedger(tmp_path / "ledger.json")
+    assert ledger.status("s", "h1") == "new"
+    ledger.record("s", "h1", D("0.2"), D("0.1"), T0)
+    assert ledger.status("s", "h1") == "clean"
+    ledger.record("s", "h1", D("0.2"), D("0.1"), T0)  # same hash again changes nothing
+    assert len(ExamLedger(tmp_path / "ledger.json")._data["s"]) == 1
+
+
+def test_editing_a_strategy_after_its_exam_makes_the_new_version_not_clean(tmp_path: Any) -> None:
+    ledger = ExamLedger(tmp_path / "ledger.json")
+    ledger.record("s", "h1", D("0.2"), D("0.1"), T0)
+    assert ledger.status("s", "h2") == "seen by an earlier version"
+    ledger.record("s", "h2", D("0.5"), D("0.1"), T0)
+    assert ledger.status("s", "h2") == "seen by an earlier version"  # recording does not launder it
+    assert ledger.status("s", "h1") == "clean"
+    assert ledger.status("other", "h9") == "new"
+
+
+def test_the_ledger_survives_a_restart_and_rejects_a_corrupt_file(tmp_path: Any) -> None:
+    path = tmp_path / "sub" / "ledger.json"
+    ExamLedger(path).record("s", "h1", D("0.2"), D("0.1"), T0)
+    assert ExamLedger(path).status("s", "h1") == "clean"
+    path.write_text("{not json")
+    with pytest.raises(ValueError, match="exam ledger"):
+        ExamLedger(path)
+
+
+def test_recording_writes_valid_json_in_a_new_nested_directory_and_leaves_no_temp_files(
+    tmp_path: Any,
+) -> None:
+    path = tmp_path / "a" / "b" / "ledger.json"
+    ExamLedger(path).record("s", "h1", D("0.2"), D("0.1"), T0)
+    assert json.loads(path.read_text())["s"][0]["hash"] == "h1"
+    assert [p.name for p in path.parent.iterdir()] == ["ledger.json"]

@@ -11,11 +11,15 @@ Protocol (see docs/superpowers/specs/2026-10-13-strategy-evaluation-design.md):
 
 from __future__ import annotations
 
+import json
+import os
+import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal
 
 from engine.backtest.benchmark import equal_weight_return
 from engine.backtest.engine import BacktestConfig
@@ -183,3 +187,52 @@ def evaluate(
         span = WindowSpan(exam_idx - p.train_bars, exam_idx, len(timeline))
         exam = score_span("final exam", strategy, own, config, timeline, span, chosen, objective, p)
     return Evaluation(strategy.id, strategy.hash, windows, exam)
+
+
+ExamStatus = Literal["not run", "new", "clean", "seen by an earlier version"]
+
+
+class ExamLedger:
+    """Which strategy versions have had their final exam. One entry per strategy hash; the first version of a
+    strategy id to be examined is 'clean', every later edited version is permanently 'seen by an earlier
+    version', because its author had already looked at the exam result."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._data: dict[str, list[dict[str, Any]]] = {}
+        if path.exists():
+            try:
+                loaded = json.loads(path.read_text())
+                if not isinstance(loaded, dict):
+                    raise ValueError("not an object")
+                self._data = loaded
+            except ValueError as exc:
+                raise ValueError(f"exam ledger {path} is unreadable ({exc}); fix or delete it") from exc
+
+    def status(self, strategy_id: str, strategy_hash: str) -> ExamStatus:
+        entries = self._data.get(strategy_id, [])
+        for e in entries:
+            if e["hash"] == strategy_hash:
+                return "clean" if e["clean"] else "seen by an earlier version"
+        return "new" if not entries else "seen by an earlier version"
+
+    def record(
+        self, strategy_id: str, strategy_hash: str, exam_return: Decimal, benchmark: Decimal, now: datetime
+    ) -> None:
+        entries = self._data.setdefault(strategy_id, [])
+        if any(e["hash"] == strategy_hash for e in entries):
+            return
+        entries.append(
+            {
+                "hash": strategy_hash,
+                "clean": not entries,
+                "recorded": now.isoformat(),
+                "exam_return": str(exam_return),
+                "benchmark_return": str(benchmark),
+            }
+        )
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=self._path.parent, suffix=".tmp")
+        with os.fdopen(fd, "w") as fh:
+            json.dump(self._data, fh, indent=2)
+        os.replace(tmp, self._path)  # atomic: a crash never leaves a half-written ledger
