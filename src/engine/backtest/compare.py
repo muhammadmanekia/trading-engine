@@ -20,7 +20,7 @@ from typing import Any
 from engine.backtest.benchmark import equal_weight_return
 from engine.backtest.engine import BacktestConfig
 from engine.backtest.walkforward import Objective, backtest, objective_value, parameter_grid
-from engine.marketdata.history import Bar
+from engine.marketdata.history import Bar, timeframe_delta
 from engine.strategy.schema import StrategyDef, with_overrides
 
 ZERO = Decimal(0)
@@ -61,7 +61,7 @@ def rolling_spans(bars_before_exam: int, p: Protocol) -> list[WindowSpan]:
 class WindowScore:
     label: str
     start: datetime
-    end: datetime  # exclusive end of the scored period (the last bar's time for the open-ended exam)
+    end: datetime  # exclusive end of the scored period (for the open-ended exam: the last bar's close time)
     strategy_return: Decimal
     benchmark_return: Decimal
     trades: int
@@ -108,7 +108,8 @@ def _choose(
     objective: Objective,
     min_trades: int,
 ) -> dict[str, Any] | None:
-    """The best parameter set on [lo, hi), or None if none made `min_trades`. Without a grid this is {}."""
+    """The best parameter set on [lo, hi), or None if none made `min_trades`. Without a grid it returns {}
+    (the strategy as written) and never sits a window out."""
     candidates = parameter_grid(grid)
     if len(candidates) == 1:
         return candidates[0]
@@ -135,14 +136,19 @@ def score_span(
 ) -> WindowScore:
     train_lo, test_lo = timeline[span.train_lo], timeline[span.test_lo]
     test_hi = timeline[span.test_hi] if span.test_hi < len(timeline) else None
-    end = test_hi or timeline[-1]
-    bench = equal_weight_return(_cut(data, test_lo, test_hi), config.venue)
+    end = test_hi or timeline[-1] + timeframe_delta(strategy.timeframe)
+    try:
+        bench = equal_weight_return(_cut(data, test_lo, test_hi), config.venue)
+    except ValueError as exc:
+        raise ValueError(f"{label}: {exc}") from exc
     params = _choose(strategy, data, config, train_lo, test_lo, grid, objective, p.tune_min_trades)
     if params is None:
         return WindowScore(label, test_lo, end, ZERO, bench, 0, ZERO, {}, sat_out=True)
     variant = with_overrides(strategy, params) if params else strategy
-    context_lo = timeline[max(0, span.test_lo - strategy.window)]  # indicators warm up before the window
-    _, m = backtest(variant, _cut(data, context_lo, test_hi), config, trade_from=test_lo)
+    # The first decision is taken at the close of the bar before the window, so its fill is the window's
+    # first open, the same price the benchmark pays. That decision only uses past bars.
+    context_lo = timeline[max(0, span.test_lo - variant.window)]  # indicators warm up before the window
+    _, m = backtest(variant, _cut(data, context_lo, test_hi), config, trade_from=timeline[span.test_lo - 1])
     return WindowScore(label, test_lo, end, m.total_return, bench, m.trades, m.max_drawdown, params)
 
 

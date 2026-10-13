@@ -11,6 +11,7 @@ import pytest
 from engine.backtest.compare import Protocol, WindowSpan, evaluate, required_wins, rolling_spans, stressed
 from engine.backtest.engine import BacktestConfig
 from engine.backtest.venue import ALPACA_STOCKS
+from engine.backtest.walkforward import backtest
 from engine.risk.config import disposable_money_preset
 from engine.strategy.schema import parse_strategy
 from tests.helpers import D, bars_from_closes
@@ -98,6 +99,7 @@ def test_running_the_exam_does_not_change_the_rolling_results() -> None:
 def test_a_strategy_that_never_trades_earns_zero_and_loses_to_a_rising_benchmark() -> None:
     ev = evaluate(parse_strategy(NEVER), DATA, cfg(), PROTO, EXAM, run_exam=True)
     assert all(w.strategy_return == 0 and w.trades == 0 for w in ev.windows)
+    assert ev.exam is not None and ev.exam.strategy_return == 0 and ev.exam.trades == 0
     assert all(w.excess == -w.benchmark_return for w in ev.windows)
 
 
@@ -121,11 +123,63 @@ def test_costs_only_ever_reduce_the_scored_returns() -> None:
     assert sum(w.strategy_return for w in worse.windows) <= sum(w.strategy_return for w in base.windows)
 
 
-def test_a_parameter_grid_is_tuned_on_the_training_window_only() -> None:
+def test_a_parameter_grid_records_the_chosen_parameters_per_window() -> None:
     grid = {"indicators.fast.period": [2, 3, 4]}
     ev = evaluate(parse_strategy(SPEC), DATA, cfg(), PROTO, EXAM, run_exam=False, grid=grid)
     assert len(ev.windows) == 6
     assert all(w.sat_out or "indicators.fast.period" in w.params for w in ev.windows)
+
+
+def perturbed(data: dict[str, list[Any]], from_ts: Any) -> dict[str, list[Any]]:
+    """The same timestamps, but every bar at or after `from_ts` replaced with different, wild prices."""
+    out = {}
+    for sym, bars in data.items():
+        junk = walk(len(bars), seed=99, drift=-0.01, vol=0.15)
+        out[sym] = [
+            j.model_copy(update={"ts": b.ts}) if b.ts >= from_ts else b
+            for b, j in zip(bars, junk, strict=True)
+        ]
+    return out
+
+
+def test_nothing_at_or_after_the_exam_start_can_change_the_rolling_windows() -> None:
+    before = evaluate(parse_strategy(SPEC), DATA, cfg(COSTLY), PROTO, EXAM, run_exam=False)
+    after = evaluate(parse_strategy(SPEC), perturbed(DATA, EXAM), cfg(COSTLY), PROTO, EXAM, run_exam=False)
+    assert before.windows == after.windows
+
+
+def test_a_window_choice_and_earlier_windows_ignore_everything_from_its_test_start_on() -> None:
+    grid = {"indicators.fast.period": [2, 3, 4, 5]}
+    k = 3
+    base = evaluate(parse_strategy(SPEC), DATA, cfg(COSTLY), PROTO, EXAM, run_exam=False, grid=grid)
+    test_start = base.windows[k - 1].start
+    after = evaluate(
+        parse_strategy(SPEC), perturbed(DATA, test_start), cfg(COSTLY), PROTO, EXAM, run_exam=False, grid=grid
+    )
+    assert base.windows[: k - 1] == after.windows[: k - 1]
+    assert (base.windows[k - 1].params, base.windows[k - 1].sat_out) == (
+        after.windows[k - 1].params,
+        after.windows[k - 1].sat_out,
+    )
+    # teeth: the grid does pick different parameters in different windows, and the perturbation does matter
+    assert len({tuple(w.params.items()) for w in base.windows}) > 1
+    assert base.windows[k - 1] != after.windows[k - 1]
+
+
+def test_the_strategy_first_fills_at_the_window_first_open_like_the_benchmark() -> None:
+    up = {"X": bars_from_closes([100 + i * 0.5 for i in range(600)], spread="0.02", volume="1000000")}
+    timeline = [b.ts for b in up["X"]]
+    test_lo = 480
+    result, _ = backtest(parse_strategy(HOLD), {"X": up["X"][400:]}, cfg(), trade_from=timeline[test_lo - 1])
+    fills = [e for e in result.events if e.type == "OrderFilled"]
+    assert fills and fills[0].ts == timeline[test_lo]
+
+
+def test_a_symbol_with_no_bars_in_a_window_names_the_window() -> None:
+    spec = {**SPEC, "universe": ["X", "Y"]}
+    short = {"X": DATA["X"], "Y": DATA["X"][:100]}
+    with pytest.raises(ValueError, match=r"window \d+: no bars for Y"):
+        evaluate(parse_strategy(spec), short, cfg(), PROTO, EXAM, run_exam=False)
 
 
 def test_not_enough_history_before_the_exam_is_an_error() -> None:
