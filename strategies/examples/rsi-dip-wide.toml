@@ -1,3 +1,5 @@
+# The 25 stocks are today's large caps, chosen with hindsight; trend and momentum strategies are flattered
+# relative to buy-and-hold. Any wider rerun should use point-in-time index membership, not today's list.
 # Mean reversion: buy a liquid stock after a sharp dip, sell when it recovers.
 # Stocks on Alpaca can hold a full bracket, so a take-profit is allowed here.
 id = "rsi-dip-wide"

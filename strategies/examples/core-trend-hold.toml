@@ -1,3 +1,5 @@
+# The 25 stocks are today's large caps, chosen with hindsight; trend and momentum strategies are flattered
+# relative to buy-and-hold. Any wider rerun should use point-in-time index membership, not today's list.
 # The "baseline holding": own each stock while it is above its 200-day average, step aside when it falls below.
 # Meant to run NEXT TO rsi-dip-wide.toml (same 25 stocks): this is the core, the dip-buyer adds on top.
 id = "core-trend-hold"
