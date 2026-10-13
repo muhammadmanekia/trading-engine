@@ -116,11 +116,10 @@ def _choose(
 ) -> dict[str, Any] | None:
     """The best parameter set on [lo, hi), or None if none made `min_trades`. Without a grid it returns {}
     (the strategy as written) and never sits a window out."""
-    candidates = parameter_grid(grid)
-    if len(candidates) == 1:
-        return candidates[0]
+    if not grid:
+        return {}
     best: tuple[dict[str, Any], Decimal] | None = None
-    for params in candidates:
+    for params in parameter_grid(grid):
         variant = with_overrides(strategy, params) if params else strategy
         _, m = backtest(variant, _cut(data, lo, hi), config)
         score = objective_value(m, objective)
@@ -178,6 +177,11 @@ def evaluate(
     if not spans:
         raise ValueError(
             f"not enough history before the exam: need {p.train_bars + p.test_bars} bars, have {exam_idx}"
+        )
+    exam_bars = len(timeline) - exam_idx
+    if exam_bars < p.test_bars:
+        raise ValueError(
+            f"the final exam has {exam_bars} bars; it needs at least {p.test_bars} (one test window)"
         )
     chosen = grid or {}
     windows = tuple(

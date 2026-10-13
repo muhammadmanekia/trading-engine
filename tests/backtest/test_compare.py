@@ -172,6 +172,15 @@ def test_a_parameter_grid_records_the_chosen_parameters_per_window() -> None:
     assert all(w.sat_out or "indicators.fast.period" in w.params for w in ev.windows)
 
 
+def test_a_one_combination_grid_still_requires_enough_training_trades() -> None:
+    ev = evaluate(
+        parse_strategy(NEVER), DATA, cfg(), PROTO, EXAM, run_exam=True, grid={"indicators.fast.period": [3]}
+    )
+    assert all(w.sat_out for w in ev.windows) and ev.exam is not None and ev.exam.sat_out
+    no_grid = evaluate(parse_strategy(NEVER), DATA, cfg(), PROTO, EXAM, run_exam=True)
+    assert not any(w.sat_out for w in (*no_grid.windows, no_grid.exam) if w is not None)
+
+
 def perturbed(data: dict[str, list[Any]], from_ts: Any) -> dict[str, list[Any]]:
     """The same timestamps, but every bar at or after `from_ts` replaced with different, wild prices."""
     out = {}
@@ -224,9 +233,11 @@ def test_a_symbol_with_no_bars_in_a_window_names_the_window() -> None:
         evaluate(parse_strategy(spec), short, cfg(), PROTO, EXAM, run_exam=False)
 
 
-def test_not_enough_history_before_the_exam_is_an_error() -> None:
+def test_not_enough_history_before_or_during_the_exam_is_an_error() -> None:
     with pytest.raises(ValueError, match="not enough history before the exam"):
         evaluate(parse_strategy(SPEC), DATA, cfg(), PROTO, DATA["X"][150].ts, run_exam=False)
+    with pytest.raises(ValueError, match="the final exam has 40 bars; it needs at least 60"):
+        evaluate(parse_strategy(SPEC), DATA, cfg(), PROTO, DATA["X"][560].ts, run_exam=True)
     with pytest.raises(ValueError, match="after the last bar"):
         evaluate(
             parse_strategy(SPEC), DATA, cfg(), PROTO, DATA["X"][-1].ts + timedelta(days=9), run_exam=False
