@@ -151,3 +151,14 @@ docker compose up -d postgres         # optional: a persistent dev database
 - Alerts are best-effort and start from "now" after a restart (history is in the event log, not replayed).
 - The Robinhood signing format and quote field names are implemented from the published spec summary and
   must be confirmed once with the live read-only test before relying on them.
+
+## Control panel (no commands to remember)
+
+```bash
+export ENGINE_DATABASE_URL=... ALPACA_PAPER_KEY_ID=... ALPACA_PAPER_SECRET=...   # and the model keys if you use them
+python -m engine.service panel --config config/local.toml        # then open http://127.0.0.1:8765
+```
+
+One local page with buttons: start/stop the service, status, quotes, kill switch, a manual order form, model
+proposals with Approve/Reject, the model report, and the live API checks. It runs the same commands as the CLI,
+listens on 127.0.0.1 only, and cannot switch an account to LIVE.

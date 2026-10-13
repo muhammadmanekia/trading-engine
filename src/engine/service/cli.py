@@ -62,6 +62,10 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
         return 0
 
     cfg = load_config(args.config)
+    if args.command == "panel":
+        from engine.service.panel import run_panel
+
+        return run_panel(args.config, args.port)
     if args.command == "run":
         return _run(cfg, secrets)
     store = PostgresEventStore(dsn)
@@ -84,6 +88,7 @@ def _parser() -> argparse.ArgumentParser:
         ("adjust", "record an operator-approved ledger correction"),
         ("submit-intent", "queue a manual trade intent (the running service decides and executes it)"),
         ("show", "show what happened to one intent: decision, orders, fills"),
+        ("panel", "open a local web page with buttons for these commands"),
         ("llm-report", "score recorded model decisions on later prices and compare the models"),
         ("proposals", "list trade ideas from LLM strategies waiting for your approval"),
         ("approve", "approve a pending proposal: it is queued as an intent and still faces the risk engine"),
@@ -112,6 +117,8 @@ def _parser() -> argparse.ArgumentParser:
                 "--ttl-minutes", type=int, default=10, help="the intent expires if not decided by then"
             )
             sp.add_argument("--dry-run", action="store_true", help="print the intent without queueing it")
+        if name == "panel":
+            sp.add_argument("--port", type=int, default=8765)
         if name == "llm-report":
             sp.add_argument("--days", type=int, default=30)
             sp.add_argument(
