@@ -189,3 +189,24 @@ def test_not_enough_history_before_the_exam_is_an_error() -> None:
         evaluate(
             parse_strategy(SPEC), DATA, cfg(), PROTO, DATA["X"][-1].ts + timedelta(days=9), run_exam=False
         )
+
+
+def test_score_span_lets_the_strategy_decide_at_the_close_before_the_window_opens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guards score_span's own trade_from: the benchmark buys at the window's first open, so the strategy must be
+    allowed to act at the previous bar's close (otherwise it gets there one bar late)."""
+    import engine.backtest.compare as compare
+
+    seen: list[Any] = []
+    real = compare.backtest
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs.get("trade_from"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(compare, "backtest", spy)
+    ev = evaluate(parse_strategy(SPEC), DATA, cfg(), PROTO, EXAM, run_exam=True)
+    times = [b.ts for b in DATA["X"]]
+    expected = [times[times.index(w.start) - 1] for w in (*ev.windows, ev.exam) if w is not None]
+    assert seen == expected
