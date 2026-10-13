@@ -7,6 +7,7 @@ the backtest package never does.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from collections.abc import Mapping, Sequence
@@ -17,6 +18,16 @@ from typing import Any
 
 from pydantic import SecretStr
 
+from engine.backtest.compare import (
+    ExamLedger,
+    ExamStatus,
+    Protocol,
+    evaluate,
+    format_scoreboard,
+    judge,
+    scoreboard_json,
+    stressed,
+)
 from engine.backtest.engine import BacktestConfig, BacktestEngine
 from engine.backtest.metrics import compute_metrics
 from engine.backtest.replay import replay_account, starting_cash
@@ -95,6 +106,27 @@ def _parser() -> argparse.ArgumentParser:
     common(sens)
     sens.add_argument("--param", action="append", required=True, metavar="PATH")
     sens.add_argument("--objective", choices=["sharpe", "total_return", "avg_r"], default="sharpe")
+    cmp_ = sub.add_parser(
+        "compare", help="score strategies against buy-and-hold: rolling windows + a locked final exam"
+    )
+    common(cmp_)
+    cmp_.add_argument("--train-bars", type=int, default=504)
+    cmp_.add_argument("--test-bars", type=int, default=126)
+    cmp_.add_argument(
+        "--exam-start", default="2024-07-01", help="first bar of the final exam (YYYY-MM-DD[THH:MM:SS])"
+    )
+    cmp_.add_argument(
+        "--final-exam", action="store_true", help="also run the final exam (recorded in the ledger)"
+    )
+    cmp_.add_argument("--ledger", default="runs/exam-ledger.json")
+    cmp_.add_argument(
+        "--grid",
+        action="append",
+        default=[],
+        metavar="PATH=V1,V2,...",
+        help="parameters tuned on each training window",
+    )
+    cmp_.add_argument("--objective", choices=["sharpe", "total_return", "avg_r"], default="sharpe")
     rep = sub.add_parser("replay", help="re-simulate a real account's intents and report the tracking error")
     common(rep, strategies=False)
     rep.add_argument("--account", required=True)
@@ -142,8 +174,13 @@ def _dispatch(args: argparse.Namespace, env: Mapping[str, str]) -> int:
     if len(timeframes) != 1:
         raise ValueError(f"strategies in one run must share a timeframe, got {sorted(timeframes)}")
     timeframe = timeframes.pop()
+    if args.command == "compare" and args.start is None:
+        args.start = "2020-01-01"  # the rolling windows need years of history, not the 1-year default
     symbols = sorted({sym for s in strategies for sym in s.universe})
     data = _load(args, env, symbols, timeframe)
+
+    if args.command == "compare":
+        return _compare(args, strategies, data, config, risk_note=args.config or "built-in preset")
 
     if args.command == "run":
         sources = [RuleStrategySource(s, ACCOUNT) for s in strategies]
@@ -189,6 +226,46 @@ def _dispatch(args: argparse.Namespace, env: Mapping[str, str]) -> int:
 
 
 # ---- helpers ----------------------------------------------------------------------------------------
+def _compare(
+    args: argparse.Namespace,
+    strategies: Sequence[StrategyDef],
+    data: Mapping[str, Sequence[Bar]],
+    config: BacktestConfig,
+    *,
+    risk_note: str,
+) -> int:
+    protocol = Protocol(train_bars=args.train_bars, test_bars=args.test_bars)
+    exam_start = _parse_date(args.exam_start, datetime.now(UTC))
+    ledger = ExamLedger(Path(args.ledger))
+    grid = _parse_grid(args.grid)
+    parameter_grid(grid)  # fail fast on a too-large search
+    now = datetime.now(UTC)
+    rows = []
+    for strategy in strategies:
+        base = evaluate(
+            strategy, data, config, protocol, exam_start,
+            run_exam=args.final_exam, grid=grid, objective=args.objective,
+        )  # fmt: skip
+        stress = evaluate(
+            strategy, data, stressed(config, protocol.cost_multiplier), protocol, exam_start,
+            run_exam=args.final_exam, grid=grid, objective=args.objective,
+        )  # fmt: skip
+        status: ExamStatus = ledger.status(strategy.id, strategy.hash) if args.final_exam else "not run"
+        if args.final_exam and base.exam is not None:
+            ledger.record(
+                strategy.id, strategy.hash, base.exam.strategy_return, base.exam.benchmark_return, now
+            )
+        rows.append((base, judge(base, stress, protocol, status)))
+    text = format_scoreboard(rows, risk_note=risk_note)
+    print(text)
+    if args.out:
+        out = Path(args.out)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "scoreboard.txt").write_text(text + "\n")
+        (out / "scoreboard.json").write_text(json.dumps(scoreboard_json(rows), indent=2))
+    return 0
+
+
 def _fmt(x: Decimal | None) -> str:
     return "n/a" if x is None else f"{x:.2f}"
 

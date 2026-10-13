@@ -1,0 +1,12 @@
+# Risk layer for RESEARCH backtests only (python -m engine.backtest compare --config config/research.toml).
+# The live presets halt a strategy after 8 losing trades in a row, which is right for real money but silently
+# ends a six-year backtest early (it showed up as HALTED_STRATEGY). Here the breakers are loosened so a strategy
+# is judged on its own behaviour. Position, exposure and cash-reserve limits are unchanged.
+[risk]
+max_consecutive_losses = 1000
+daily_loss_cap_pct = 0.9
+strategy_drawdown_limit_pct = 0.9
+
+[[accounts]]
+id = "research"
+broker = "alpaca"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,7 @@ from engine.domain.types import AssetClass
 from engine.marketdata.history import to_csv
 from engine.service.backtest_cli import main
 from engine.strategy.schema import StrategyError, load_strategy, validate_for_venue
-from tests.helpers import bars_from_closes
+from tests.helpers import T0, bars_from_closes
 
 ROOT = Path(__file__).resolve().parents[2]
 STRATEGY = """
@@ -145,3 +146,38 @@ def test_replay_command_reports_zero_error_for_a_perfectly_modelled_run(
     out = capsys.readouterr().out
     assert code == 0 and "mean fill error 0.00 bps" in out and "0 filled in only one world" in out
     assert "WARNING" not in out
+
+
+def test_compare_prints_a_scoreboard_and_locks_the_exam_until_asked(
+    workdir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exam = (T0 + timedelta(hours=150)).strftime("%Y-%m-%dT%H:%M:%S")
+    ledger = workdir / "ledger.json"
+    common = args(workdir, "compare", "--train-bars", "60", "--test-bars", "30", "--exam-start", exam,
+                  "--ledger", str(ledger), "--out", str(workdir / "cmp"))  # fmt: skip
+    assert main(common, {}) == 0
+    out = capsys.readouterr().out
+    assert "Strategy comparison" in out and "wave@" in out and "EXAM NOT RUN" in out and "window 3" in out
+    assert not ledger.exists()  # looking at the rolling windows does not use up the exam
+
+    assert main([*common, "--final-exam"], {}) == 0
+    out = capsys.readouterr().out
+    assert "final exam" in out and "EXAM NOT RUN" not in out and ledger.exists()
+    assert {p.name for p in (workdir / "cmp").iterdir()} == {"scoreboard.txt", "scoreboard.json"}
+
+    (workdir / "wave.toml").write_text(
+        (workdir / "wave.toml").read_text().replace("quantity = 5", "quantity = 6")
+    )
+    assert main([*common, "--final-exam"], {}) == 0
+    assert "EXAM ALREADY SEEN" in capsys.readouterr().out  # edited after its exam: never a clean pass
+
+
+def test_compare_refuses_an_exam_start_with_too_little_history_before_it(
+    workdir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exam = (T0 + timedelta(hours=40)).strftime("%Y-%m-%dT%H:%M:%S")
+    assert (
+        main(args(workdir, "compare", "--train-bars", "60", "--test-bars", "30", "--exam-start", exam), {})
+        == 2
+    )
+    assert "not enough history before the exam" in capsys.readouterr().err
