@@ -1,0 +1,34 @@
+# Mean reversion: buy a liquid stock after a sharp dip, sell when it recovers.
+# Stocks on Alpaca can hold a full bracket, so a take-profit is allowed here.
+id = "rsi-dip-wide"
+version = 1
+description = "RSI-dip on 25 liquid large caps: buy RSI(14) < 30 above the 100-day average; exit at RSI > 55"
+universe = ["AAPL","MSFT","NVDA","AMZN","GOOGL","META","AVGO","TSLA","JPM","V","MA","UNH","XOM","LLY","COST","HD","PG","NFLX","AMD","CRM","ORCL","ADBE","KO","PEP","WMT"]
+timeframe = "1d"
+max_positions = 5
+
+[indicators]
+rsi   = { type = "rsi", period = 14 }
+trend = { type = "sma", period = 100 }
+atr   = { type = "atr", period = 14 }
+
+[entry]
+all = [
+  { lt = ["rsi", 30] },
+  { gt = ["close", "trend"] },     # only buy dips in an uptrend
+]
+
+[exit]
+gt = ["rsi", 55]
+
+[stop]
+type = "atr"
+multiple = 2.0
+
+[take_profit]
+type = "r_multiple"
+multiple = 3.0                      # allowed on Alpaca (native bracket); rejected on Robinhood
+
+[sizing]
+type = "risk_fraction"
+risk_pct = 0.01

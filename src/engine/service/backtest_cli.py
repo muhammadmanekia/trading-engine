@@ -30,6 +30,7 @@ from engine.marketdata.history import Bar, BarCache, CsvBars, HistoricalData
 from engine.marketdata.recorder import recorded_spread_bps
 from engine.risk.config import RiskConfig, disposable_money_preset, replace
 from engine.service.config import load_config
+from engine.service.dotenv import load_env_file
 from engine.strategy.schema import StrategyDef, StrategyError, load_strategy
 from engine.strategy.source import RuleStrategySource
 
@@ -37,7 +38,9 @@ ACCOUNT = "bt"
 
 
 def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None) -> int:
-    env = os.environ if env is None else env
+    if env is None:
+        load_env_file()  # same .env as the service, so keys need setting only once
+        env = os.environ
     args = _parser().parse_args(argv)
     try:
         return _dispatch(args, env)
