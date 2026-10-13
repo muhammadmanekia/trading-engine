@@ -1,0 +1,27 @@
+# The "baseline holding": own each stock while it is above its 200-day average, step aside when it falls below.
+# Meant to run NEXT TO rsi-dip-wide.toml (same 25 stocks): this is the core, the dip-buyer adds on top.
+id = "core-trend-hold"
+version = 1
+description = "Hold 25 large caps while above their 200-day average; wide ATR stop as a crash backstop"
+universe = ["AAPL","MSFT","NVDA","AMZN","GOOGL","META","AVGO","TSLA","JPM","V","MA","UNH","XOM","LLY","COST","HD","PG","NFLX","AMD","CRM","ORCL","ADBE","KO","PEP","WMT"]
+timeframe = "1d"
+max_positions = 25
+cooldown_bars = 5          # after stepping aside, wait a week before re-entering (avoids whipsaw churn)
+
+[indicators]
+trend = { type = "sma", period = 200 }
+atr   = { type = "atr", period = 14 }
+
+[entry]
+gt = ["close", "trend"]
+
+[exit]
+lt = ["close", { mul = ["trend", 0.98] }]     # leave only when clearly below the average, not on a brief poke
+
+[stop]
+type = "atr"
+multiple = 4.0             # wide: a backstop for gaps and crashes, not a trading signal
+
+[sizing]
+type = "fixed_notional"
+notional = 3000            # about 3% of a $100k account per stock
